@@ -1,0 +1,4 @@
+comment = 'pg_viewctl - view control utilities'
+default_version = '0.1.0'
+module_pathname = '$libdir/pg_viewctl'
+relocatable = true
