@@ -2,4 +2,5 @@
 *.so
 *.dylib
 *.bc
+sql_queries.h
 .deps
