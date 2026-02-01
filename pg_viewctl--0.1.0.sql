@@ -87,3 +87,15 @@ GROUP BY
     dc.removal_date,
     dc.deprecated_at
 ORDER BY dc.schema_name, dc.view_name, dc.column_name;
+
+CREATE FUNCTION get_column_dependencies(
+    schema_name text,
+    object_name text
+) RETURNS TABLE (
+    dependent_schema text,
+    dependent_view   text,
+    dependent_column text,
+    source_column    text,
+    dependency_type  text
+) AS 'MODULE_PATHNAME', 'get_column_dependencies'
+LANGUAGE C STRICT;
