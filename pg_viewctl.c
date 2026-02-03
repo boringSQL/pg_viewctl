@@ -9,17 +9,43 @@
 
 PG_MODULE_MAGIC;
 
-#define COLDEPS_COLS 5
+/* generic context for SRFs that materialize SPI results as text */
+#define SRF_MAX_COLS 16
 
 typedef struct {
+	int ncols;
 	int total_rows;
 	int current_row;
-	char **values;  /* flat array: total_rows * COLDEPS_COLS strings */
-} ColumnDepsCtx;
+	char **values;  /* flat array: total_rows * ncols strings */
+} SRFCtx;
+
+static HeapTuple
+srf_emit_row(SRFCtx *ctx, TupleDesc tupdesc) {
+	Datum vals[SRF_MAX_COLS];
+	bool nulls[SRF_MAX_COLS];
+	int base = ctx->current_row * ctx->ncols;
+	int i;
+
+	Assert(ctx->ncols <= SRF_MAX_COLS);
+	memset(nulls, 0, sizeof(nulls));
+
+	for (i = 0; i < ctx->ncols; i++) {
+		if (ctx->values[base + i])
+			vals[i] = CStringGetTextDatum(ctx->values[base + i]);
+		else {
+			vals[i] = (Datum) 0;
+			nulls[i] = true;
+		}
+	}
+
+	return heap_form_tuple(tupdesc, vals, nulls);
+}
+
+/* --- get_column_dependencies --- */
 
 static TupleDesc
 build_coldeps_tupdesc(void) {
-	TupleDesc tupdesc = CreateTemplateTupleDesc(COLDEPS_COLS);
+	TupleDesc tupdesc = CreateTemplateTupleDesc(5);
 	TupleDescInitEntry(tupdesc, 1, "dependent_schema", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, 2, "dependent_view", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, 3, "dependent_column", TEXTOID, -1, 0);
@@ -28,14 +54,12 @@ build_coldeps_tupdesc(void) {
 	return BlessTupleDesc(tupdesc);
 }
 
-/* --- get_column_dependencies --- */
-
 PG_FUNCTION_INFO_V1(get_column_dependencies);
 
 Datum
 get_column_dependencies(PG_FUNCTION_ARGS) {
 	FuncCallContext *funcctx;
-	ColumnDepsCtx *ctx;
+	SRFCtx *ctx;
 
 	if (SRF_IS_FIRSTCALL()) {
 		MemoryContext oldctx;
@@ -49,7 +73,8 @@ get_column_dependencies(PG_FUNCTION_ARGS) {
 
 		funcctx->tuple_desc = build_coldeps_tupdesc();
 
-		ctx = palloc0(sizeof(ColumnDepsCtx));
+		ctx = palloc0(sizeof(SRFCtx));
+		ctx->ncols = 5;
 		funcctx->user_fctx = ctx;
 
 		argvals[0] = PG_GETARG_DATUM(0);
@@ -67,19 +92,18 @@ get_column_dependencies(PG_FUNCTION_ARGS) {
 
 		nrows = SPI_processed;
 		ctx->total_rows = (int) nrows;
-		ctx->current_row = 0;
 
 		if (nrows > 0) {
 			uint64 i;
 
-			ctx->values = palloc(sizeof(char *) * nrows * COLDEPS_COLS);
+			ctx->values = palloc(sizeof(char *) * nrows * ctx->ncols);
 			for (i = 0; i < nrows; i++) {
 				HeapTuple spi_tuple = SPI_tuptable->vals[i];
 				TupleDesc spi_tupdesc = SPI_tuptable->tupdesc;
-				int base = i * COLDEPS_COLS;
+				int base = i * ctx->ncols;
 				int col;
 
-				for (col = 1; col <= COLDEPS_COLS; col++)
+				for (col = 1; col <= ctx->ncols; col++)
 					ctx->values[base + col - 1] =
 						SPI_getvalue(spi_tuple, spi_tupdesc, col);
 			}
@@ -93,42 +117,18 @@ get_column_dependencies(PG_FUNCTION_ARGS) {
 	ctx = funcctx->user_fctx;
 
 	if (ctx->current_row < ctx->total_rows) {
-		Datum vals[COLDEPS_COLS];
-		bool nulls[COLDEPS_COLS] = {false};
-		int base = ctx->current_row * COLDEPS_COLS;
-		HeapTuple tuple;
-		int i;
-
-		for (i = 0; i < COLDEPS_COLS; i++) {
-			if (ctx->values[base + i])
-				vals[i] = CStringGetTextDatum(ctx->values[base + i]);
-			else {
-				vals[i] = (Datum) 0;
-				nulls[i] = true;
-			}
-		}
-
-		tuple = heap_form_tuple(funcctx->tuple_desc, vals, nulls);
+		HeapTuple tuple = srf_emit_row(ctx, funcctx->tuple_desc);
 		ctx->current_row++;
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
 	}
-
 	SRF_RETURN_DONE(funcctx);
 }
 
 /* --- analyze_drop_column --- */
 
-#define DROPCOL_COLS 5
-
-typedef struct {
-	int total_rows;
-	int current_row;
-	char **values;  /* flat array: total_rows * DROPCOL_COLS strings */
-} AnalyzeDropCtx;
-
 static TupleDesc
 build_analyze_drop_tupdesc(void) {
-	TupleDesc tupdesc = CreateTemplateTupleDesc(DROPCOL_COLS);
+	TupleDesc tupdesc = CreateTemplateTupleDesc(5);
 	TupleDescInitEntry(tupdesc, 1, "dependent_view", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, 2, "dependent_column", TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, 3, "usage_type", TEXTOID, -1, 0);
@@ -142,7 +142,7 @@ PG_FUNCTION_INFO_V1(analyze_drop_column);
 Datum
 analyze_drop_column(PG_FUNCTION_ARGS) {
 	FuncCallContext *funcctx;
-	AnalyzeDropCtx *ctx;
+	SRFCtx *ctx;
 
 	if (SRF_IS_FIRSTCALL()) {
 		MemoryContext oldctx;
@@ -156,7 +156,8 @@ analyze_drop_column(PG_FUNCTION_ARGS) {
 
 		funcctx->tuple_desc = build_analyze_drop_tupdesc();
 
-		ctx = palloc0(sizeof(AnalyzeDropCtx));
+		ctx = palloc0(sizeof(SRFCtx));
+		ctx->ncols = 5;
 		funcctx->user_fctx = ctx;
 
 		argvals[0] = PG_GETARG_DATUM(0);
@@ -175,19 +176,18 @@ analyze_drop_column(PG_FUNCTION_ARGS) {
 
 		nrows = SPI_processed;
 		ctx->total_rows = (int) nrows;
-		ctx->current_row = 0;
 
 		if (nrows > 0) {
 			uint64 i;
 
-			ctx->values = palloc(sizeof(char *) * nrows * DROPCOL_COLS);
+			ctx->values = palloc(sizeof(char *) * nrows * ctx->ncols);
 			for (i = 0; i < nrows; i++) {
 				HeapTuple spi_tuple = SPI_tuptable->vals[i];
 				TupleDesc spi_tupdesc = SPI_tuptable->tupdesc;
-				int base = i * DROPCOL_COLS;
+				int base = i * ctx->ncols;
 				int col;
 
-				for (col = 1; col <= DROPCOL_COLS; col++)
+				for (col = 1; col <= ctx->ncols; col++)
 					ctx->values[base + col - 1] =
 						SPI_getvalue(spi_tuple, spi_tupdesc, col);
 			}
@@ -201,25 +201,9 @@ analyze_drop_column(PG_FUNCTION_ARGS) {
 	ctx = funcctx->user_fctx;
 
 	if (ctx->current_row < ctx->total_rows) {
-		Datum vals[DROPCOL_COLS];
-		bool nulls[DROPCOL_COLS] = {false};
-		int base = ctx->current_row * DROPCOL_COLS;
-		HeapTuple tuple;
-		int i;
-
-		for (i = 0; i < DROPCOL_COLS; i++) {
-			if (ctx->values[base + i])
-				vals[i] = CStringGetTextDatum(ctx->values[base + i]);
-			else {
-				vals[i] = (Datum) 0;
-				nulls[i] = true;
-			}
-		}
-
-		tuple = heap_form_tuple(funcctx->tuple_desc, vals, nulls);
+		HeapTuple tuple = srf_emit_row(ctx, funcctx->tuple_desc);
 		ctx->current_row++;
 		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
 	}
-
 	SRF_RETURN_DONE(funcctx);
 }
