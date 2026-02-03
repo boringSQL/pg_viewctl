@@ -115,3 +115,111 @@ get_column_dependencies(PG_FUNCTION_ARGS) {
 
 	SRF_RETURN_DONE(funcctx);
 }
+
+/* --- analyze_drop_column --- */
+
+#define DROPCOL_COLS 5
+
+typedef struct {
+	int total_rows;
+	int current_row;
+	char **values;  /* flat array: total_rows * DROPCOL_COLS strings */
+} AnalyzeDropCtx;
+
+static TupleDesc
+build_analyze_drop_tupdesc(void) {
+	TupleDesc tupdesc = CreateTemplateTupleDesc(DROPCOL_COLS);
+	TupleDescInitEntry(tupdesc, 1, "dependent_view", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 2, "dependent_column", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 3, "usage_type", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 4, "impact_severity", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 5, "usage_location", TEXTOID, -1, 0);
+	return BlessTupleDesc(tupdesc);
+}
+
+PG_FUNCTION_INFO_V1(analyze_drop_column);
+
+Datum
+analyze_drop_column(PG_FUNCTION_ARGS) {
+	FuncCallContext *funcctx;
+	AnalyzeDropCtx *ctx;
+
+	if (SRF_IS_FIRSTCALL()) {
+		MemoryContext oldctx;
+		Oid argtypes[3] = {TEXTOID, TEXTOID, TEXTOID};
+		Datum argvals[3];
+		int ret;
+		uint64 nrows;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldctx = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		funcctx->tuple_desc = build_analyze_drop_tupdesc();
+
+		ctx = palloc0(sizeof(AnalyzeDropCtx));
+		funcctx->user_fctx = ctx;
+
+		argvals[0] = PG_GETARG_DATUM(0);
+		argvals[1] = PG_GETARG_DATUM(1);
+		argvals[2] = PG_GETARG_DATUM(2);
+
+		SPI_connect();
+		ret = SPI_execute_with_args(sql_analyze_drop_column,
+									3, argtypes, argvals, NULL, true, 0);
+
+		if (ret != SPI_OK_SELECT) {
+			SPI_finish();
+			MemoryContextSwitchTo(oldctx);
+			SRF_RETURN_DONE(funcctx);
+		}
+
+		nrows = SPI_processed;
+		ctx->total_rows = (int) nrows;
+		ctx->current_row = 0;
+
+		if (nrows > 0) {
+			uint64 i;
+
+			ctx->values = palloc(sizeof(char *) * nrows * DROPCOL_COLS);
+			for (i = 0; i < nrows; i++) {
+				HeapTuple spi_tuple = SPI_tuptable->vals[i];
+				TupleDesc spi_tupdesc = SPI_tuptable->tupdesc;
+				int base = i * DROPCOL_COLS;
+				int col;
+
+				for (col = 1; col <= DROPCOL_COLS; col++)
+					ctx->values[base + col - 1] =
+						SPI_getvalue(spi_tuple, spi_tupdesc, col);
+			}
+		}
+
+		SPI_finish();
+		MemoryContextSwitchTo(oldctx);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	ctx = funcctx->user_fctx;
+
+	if (ctx->current_row < ctx->total_rows) {
+		Datum vals[DROPCOL_COLS];
+		bool nulls[DROPCOL_COLS] = {false};
+		int base = ctx->current_row * DROPCOL_COLS;
+		HeapTuple tuple;
+		int i;
+
+		for (i = 0; i < DROPCOL_COLS; i++) {
+			if (ctx->values[base + i])
+				vals[i] = CStringGetTextDatum(ctx->values[base + i]);
+			else {
+				vals[i] = (Datum) 0;
+				nulls[i] = true;
+			}
+		}
+
+		tuple = heap_form_tuple(funcctx->tuple_desc, vals, nulls);
+		ctx->current_row++;
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+
+	SRF_RETURN_DONE(funcctx);
+}

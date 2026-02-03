@@ -99,3 +99,16 @@ CREATE FUNCTION get_column_dependencies(
     dependency_type  text
 ) AS 'MODULE_PATHNAME', 'get_column_dependencies'
 LANGUAGE C STRICT;
+
+CREATE FUNCTION analyze_drop_column(
+    schema_name text,
+    view_name   text,
+    column_name text
+) RETURNS TABLE (
+    dependent_view    text,
+    dependent_column  text,
+    usage_type        text,
+    impact_severity   text,
+    usage_location    text
+) AS 'MODULE_PATHNAME', 'analyze_drop_column'
+LANGUAGE C STRICT;
