@@ -112,3 +112,13 @@ CREATE FUNCTION analyze_drop_column(
     usage_location    text
 ) AS 'MODULE_PATHNAME', 'analyze_drop_column'
 LANGUAGE C STRICT;
+
+CREATE FUNCTION deprecate_column(
+    schema_name  text,
+    view_name    text,
+    column_name  text,
+    message      text DEFAULT NULL,
+    removal_date date DEFAULT NULL
+) RETURNS text
+AS 'MODULE_PATHNAME', 'deprecate_column'
+LANGUAGE C;

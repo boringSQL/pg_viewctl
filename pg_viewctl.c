@@ -207,3 +207,87 @@ analyze_drop_column(PG_FUNCTION_ARGS) {
 	}
 	SRF_RETURN_DONE(funcctx);
 }
+
+/* --- deprecate_column --- */
+
+PG_FUNCTION_INFO_V1(deprecate_column);
+
+Datum
+deprecate_column(PG_FUNCTION_ARGS) {
+	Oid argtypes_val[3] = {TEXTOID, TEXTOID, TEXTOID};
+	Datum argvals_val[3];
+	Oid argtypes_ups[5] = {TEXTOID, TEXTOID, TEXTOID, TEXTOID, DATEOID};
+	Datum argvals_ups[5];
+	char argnulls[5];
+	char *schema_name, *view_name, *column_name;
+	StringInfoData msg;
+	int ret;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("schema_name, view_name, and column_name must not be NULL")));
+
+	schema_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	view_name   = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	column_name = text_to_cstring(PG_GETARG_TEXT_PP(2));
+
+	SPI_connect();
+
+	/* validate column exists on the view */
+	argvals_val[0] = PG_GETARG_DATUM(0);
+	argvals_val[1] = PG_GETARG_DATUM(1);
+	argvals_val[2] = PG_GETARG_DATUM(2);
+
+	ret = SPI_execute_with_args(sql_validate_column_exists,
+								3, argtypes_val, argvals_val, NULL, true, 1);
+
+	if (ret != SPI_OK_SELECT || SPI_processed == 0) {
+		SPI_finish();
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_COLUMN),
+				 errmsg("column \"%s\" not found on view \"%s.%s\"",
+						column_name, schema_name, view_name)));
+	}
+
+	/* upsert into pgvc_deprecated_columns */
+	argvals_ups[0] = PG_GETARG_DATUM(0);
+	argvals_ups[1] = PG_GETARG_DATUM(1);
+	argvals_ups[2] = PG_GETARG_DATUM(2);
+
+	argnulls[0] = ' ';
+	argnulls[1] = ' ';
+	argnulls[2] = ' ';
+
+	if (PG_ARGISNULL(3)) {
+		argnulls[3] = 'n';
+		argvals_ups[3] = (Datum) 0;
+	} else {
+		argnulls[3] = ' ';
+		argvals_ups[3] = PG_GETARG_DATUM(3);
+	}
+
+	if (PG_ARGISNULL(4)) {
+		argnulls[4] = 'n';
+		argvals_ups[4] = (Datum) 0;
+	} else {
+		argnulls[4] = ' ';
+		argvals_ups[4] = PG_GETARG_DATUM(4);
+	}
+
+	ret = SPI_execute_with_args(sql_deprecate_column_upsert,
+								5, argtypes_ups, argvals_ups, argnulls, false, 0);
+
+	SPI_finish();
+
+	if (ret != SPI_OK_INSERT)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to deprecate column \"%s.%s.%s\"",
+						schema_name, view_name, column_name)));
+
+	initStringInfo(&msg);
+	appendStringInfo(&msg, "column %s.%s.%s deprecated",
+					 schema_name, view_name, column_name);
+	PG_RETURN_TEXT_P(cstring_to_text(msg.data));
+}
