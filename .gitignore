@@ -4,3 +4,7 @@
 *.bc
 sql_queries.h
 .deps
+results/
+regression.diffs
+regression.out
+tmp_check/
