@@ -41,19 +41,22 @@ SELECT
     sa.attname as source_column,
     dn.nspname as dependent_schema,
     dc.relname as dependent_view,
-    COALESCE(da.attname, '<view_level>') as dependent_column,
+    COALESCE(da.attname, sa.attname) as dependent_column,
     pgvc_map_deptype(d.deptype) as dependency_type,
     pgvc_map_impact(d.deptype) as impact_severity
 FROM pg_depend d
+    JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass
+        AND d.objid = rw.oid
+    JOIN pg_class dc ON rw.ev_class = dc.oid
+    JOIN pg_namespace dn ON dc.relnamespace = dn.oid
     JOIN pg_class sc ON d.refobjid = sc.oid
     JOIN pg_namespace sn ON sc.relnamespace = sn.oid
-    LEFT JOIN pg_attribute sa ON d.refobjid = sa.attrelid
+    JOIN pg_attribute sa ON d.refobjid = sa.attrelid
         AND d.refobjsubid = sa.attnum
         AND sa.attnum > 0
-    JOIN pg_class dc ON d.objid = dc.oid
-    JOIN pg_namespace dn ON dc.relnamespace = dn.oid
-    LEFT JOIN pg_attribute da ON d.objid = da.attrelid
-        AND d.objsubid = da.attnum
+    LEFT JOIN pg_attribute da ON da.attrelid = dc.oid
+        AND da.attname = sa.attname
+        AND NOT da.attisdropped
         AND da.attnum > 0
 WHERE dc.relkind IN ('v', 'm')
     AND sc.relkind IN ('r', 'v', 'm')
