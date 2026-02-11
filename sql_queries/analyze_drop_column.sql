@@ -7,7 +7,7 @@ WITH target_view AS (
       AND c.relkind IN ('v', 'm')
 ),
 target_column AS (
-    SELECT a.attnum
+    SELECT a.attnum, a.attname
     FROM pg_attribute a
     JOIN target_view tv ON a.attrelid = tv.oid
     WHERE a.attname = $3
@@ -17,19 +17,21 @@ target_column AS (
 column_deps AS (
     SELECT dep_ns.nspname AS dependent_schema,
            dep_cl.relname AS dependent_view,
-           dep_at.attname AS dependent_column,
+           COALESCE(dep_at.attname, tc.attname) AS dependent_column,
            d.deptype
     FROM pg_depend d
+    JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass
+        AND d.objid = rw.oid
     JOIN target_view tv ON d.refobjid = tv.oid
     JOIN target_column tc ON d.refobjsubid = tc.attnum
-    JOIN pg_class dep_cl ON d.objid = dep_cl.oid
+    JOIN pg_class dep_cl ON rw.ev_class = dep_cl.oid
     JOIN pg_namespace dep_ns ON dep_cl.relnamespace = dep_ns.oid
-    JOIN pg_attribute dep_at ON dep_at.attrelid = dep_cl.oid
-        AND dep_at.attnum = d.objsubid
+    LEFT JOIN pg_attribute dep_at ON dep_at.attrelid = dep_cl.oid
+        AND dep_at.attname = tc.attname
+        AND NOT dep_at.attisdropped
+        AND dep_at.attnum > 0
     WHERE d.deptype IN ('n', 'a')
-      AND d.objsubid > 0
       AND dep_cl.relkind IN ('v', 'm')
-      AND NOT dep_at.attisdropped
 )
 SELECT dependent_view, dependent_column,
        pgvc_map_deptype(deptype) AS usage_type,
