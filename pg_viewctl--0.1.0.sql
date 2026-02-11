@@ -122,3 +122,47 @@ CREATE FUNCTION deprecate_column(
 ) RETURNS text
 AS 'MODULE_PATHNAME', 'deprecate_column'
 LANGUAGE C;
+
+CREATE FUNCTION undeprecate_column(
+    schema_name text,
+    view_name   text,
+    column_name text
+) RETURNS text
+AS 'MODULE_PATHNAME', 'undeprecate_column'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION get_deprecated_columns(
+    schema_filter text DEFAULT NULL
+) RETURNS TABLE (
+    schema_name         text,
+    view_name           text,
+    column_name         text,
+    deprecation_message text,
+    removal_date        text,
+    deprecated_at       text
+) AS 'MODULE_PATHNAME', 'get_deprecated_columns'
+LANGUAGE C;
+
+CREATE FUNCTION check_column_deprecated(
+    schema_name text,
+    view_name   text,
+    column_name text
+) RETURNS text
+AS 'MODULE_PATHNAME', 'check_column_deprecated'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pgvc_analyze_drop_report(
+    p_schema_name text,
+    p_view_name   text,
+    p_column_name text
+) RETURNS text AS $$
+SELECT coalesce(
+    string_agg(
+        d.impact_severity || E'\t' || d.usage_location || '.' || d.dependent_column,
+        E'\n' ORDER BY d.impact_severity = 'BREAKING' DESC,
+                       d.dependent_view, d.dependent_column
+    ),
+    'no dependencies'
+)
+FROM analyze_drop_column(p_schema_name, p_view_name, p_column_name) d;
+$$ LANGUAGE sql STABLE STRICT;

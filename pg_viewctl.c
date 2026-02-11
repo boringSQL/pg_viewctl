@@ -291,3 +291,182 @@ deprecate_column(PG_FUNCTION_ARGS) {
 					 schema_name, view_name, column_name);
 	PG_RETURN_TEXT_P(cstring_to_text(msg.data));
 }
+
+/* --- undeprecate_column --- */
+
+PG_FUNCTION_INFO_V1(undeprecate_column);
+
+Datum
+undeprecate_column(PG_FUNCTION_ARGS) {
+	char *schema_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char *view_name   = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char *column_name = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	Oid argtypes[3] = {TEXTOID, TEXTOID, TEXTOID};
+	Datum argvals[3];
+	StringInfoData msg;
+	int ret;
+
+	SPI_connect();
+
+	argvals[0] = PG_GETARG_DATUM(0);
+	argvals[1] = PG_GETARG_DATUM(1);
+	argvals[2] = PG_GETARG_DATUM(2);
+
+	ret = SPI_execute_with_args(sql_undeprecate_column,
+								3, argtypes, argvals, NULL, false, 0);
+
+	SPI_finish();
+
+	if (ret != SPI_OK_DELETE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to undeprecate column \"%s.%s.%s\"",
+						schema_name, view_name, column_name)));
+
+	initStringInfo(&msg);
+	if (SPI_processed > 0)
+		appendStringInfo(&msg, "column %s.%s.%s undeprecated",
+						 schema_name, view_name, column_name);
+	else
+		appendStringInfo(&msg, "column %s.%s.%s was not marked as deprecated",
+						 schema_name, view_name, column_name);
+
+	PG_RETURN_TEXT_P(cstring_to_text(msg.data));
+}
+
+/* --- get_deprecated_columns --- */
+
+static TupleDesc
+build_deprecated_cols_tupdesc(void) {
+	TupleDesc tupdesc = CreateTemplateTupleDesc(6);
+	TupleDescInitEntry(tupdesc, 1, "schema_name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 2, "view_name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 3, "column_name", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 4, "deprecation_message", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 5, "removal_date", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, 6, "deprecated_at", TEXTOID, -1, 0);
+	return BlessTupleDesc(tupdesc);
+}
+
+PG_FUNCTION_INFO_V1(get_deprecated_columns);
+
+Datum
+get_deprecated_columns(PG_FUNCTION_ARGS) {
+	FuncCallContext *funcctx;
+	SRFCtx *ctx;
+
+	if (SRF_IS_FIRSTCALL()) {
+		MemoryContext oldctx;
+		Oid argtypes[1] = {TEXTOID};
+		Datum argvals[1];
+		char argnulls[1];
+		int ret;
+		uint64 nrows;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldctx = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		funcctx->tuple_desc = build_deprecated_cols_tupdesc();
+
+		ctx = palloc0(sizeof(SRFCtx));
+		ctx->ncols = 6;
+		funcctx->user_fctx = ctx;
+
+		if (PG_ARGISNULL(0)) {
+			argnulls[0] = 'n';
+			argvals[0] = (Datum) 0;
+		} else {
+			argnulls[0] = ' ';
+			argvals[0] = PG_GETARG_DATUM(0);
+		}
+
+		SPI_connect();
+		ret = SPI_execute_with_args(sql_get_deprecated_columns,
+									1, argtypes, argvals, argnulls, true, 0);
+
+		if (ret != SPI_OK_SELECT) {
+			SPI_finish();
+			MemoryContextSwitchTo(oldctx);
+			SRF_RETURN_DONE(funcctx);
+		}
+
+		nrows = SPI_processed;
+		ctx->total_rows = (int) nrows;
+
+		if (nrows > 0) {
+			uint64 i;
+
+			ctx->values = palloc(sizeof(char *) * nrows * ctx->ncols);
+			for (i = 0; i < nrows; i++) {
+				HeapTuple spi_tuple = SPI_tuptable->vals[i];
+				TupleDesc spi_tupdesc = SPI_tuptable->tupdesc;
+				int base = i * ctx->ncols;
+				int col;
+
+				for (col = 1; col <= ctx->ncols; col++)
+					ctx->values[base + col - 1] =
+						SPI_getvalue(spi_tuple, spi_tupdesc, col);
+			}
+		}
+
+		SPI_finish();
+		MemoryContextSwitchTo(oldctx);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	ctx = funcctx->user_fctx;
+
+	if (ctx->current_row < ctx->total_rows) {
+		HeapTuple tuple = srf_emit_row(ctx, funcctx->tuple_desc);
+		ctx->current_row++;
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+	SRF_RETURN_DONE(funcctx);
+}
+
+/* --- check_column_deprecated --- */
+
+PG_FUNCTION_INFO_V1(check_column_deprecated);
+
+Datum
+check_column_deprecated(PG_FUNCTION_ARGS) {
+	Oid argtypes[3] = {TEXTOID, TEXTOID, TEXTOID};
+	Datum argvals[3];
+	int ret;
+
+	SPI_connect();
+
+	argvals[0] = PG_GETARG_DATUM(0);
+	argvals[1] = PG_GETARG_DATUM(1);
+	argvals[2] = PG_GETARG_DATUM(2);
+
+	ret = SPI_execute_with_args(sql_check_column_deprecated,
+								3, argtypes, argvals, NULL, true, 1);
+
+	if (ret != SPI_OK_SELECT || SPI_processed == 0) {
+		SPI_finish();
+		PG_RETURN_NULL();
+	}
+
+	{
+		HeapTuple spi_tuple = SPI_tuptable->vals[0];
+		TupleDesc spi_tupdesc = SPI_tuptable->tupdesc;
+		char *message = SPI_getvalue(spi_tuple, spi_tupdesc, 1);
+		char *removal = SPI_getvalue(spi_tuple, spi_tupdesc, 2);
+		char *schema  = text_to_cstring(PG_GETARG_TEXT_PP(0));
+		char *view    = text_to_cstring(PG_GETARG_TEXT_PP(1));
+		char *column  = text_to_cstring(PG_GETARG_TEXT_PP(2));
+		StringInfoData msg;
+
+		initStringInfo(&msg);
+		appendStringInfo(&msg, "WARNING: column %s.%s.%s is deprecated",
+						 schema, view, column);
+		if (message)
+			appendStringInfo(&msg, " — %s", message);
+		if (removal)
+			appendStringInfo(&msg, " (removal: %s)", removal);
+
+		SPI_finish();
+		PG_RETURN_TEXT_P(cstring_to_text(msg.data));
+	}
+}
