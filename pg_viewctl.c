@@ -96,6 +96,7 @@ get_column_dependencies(PG_FUNCTION_ARGS) {
 		if (nrows > 0) {
 			uint64 i;
 
+			MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 			ctx->values = palloc(sizeof(char *) * nrows * ctx->ncols);
 			for (i = 0; i < nrows; i++) {
 				HeapTuple spi_tuple = SPI_tuptable->vals[i];
@@ -180,6 +181,7 @@ analyze_drop_column(PG_FUNCTION_ARGS) {
 		if (nrows > 0) {
 			uint64 i;
 
+			MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 			ctx->values = palloc(sizeof(char *) * nrows * ctx->ncols);
 			for (i = 0; i < nrows; i++) {
 				HeapTuple spi_tuple = SPI_tuptable->vals[i];
@@ -396,6 +398,7 @@ get_deprecated_columns(PG_FUNCTION_ARGS) {
 		if (nrows > 0) {
 			uint64 i;
 
+			MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 			ctx->values = palloc(sizeof(char *) * nrows * ctx->ncols);
 			for (i = 0; i < nrows; i++) {
 				HeapTuple spi_tuple = SPI_tuptable->vals[i];
