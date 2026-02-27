@@ -169,3 +169,63 @@ SELECT coalesce(
 )
 FROM analyze_drop_column(p_schema_name, p_view_name, p_column_name) d;
 $$ LANGUAGE sql STABLE STRICT;
+
+CREATE FUNCTION pgvc_dependency_order (p_schema text, p_object text)
+    RETURNS TABLE (
+        level int,
+        dep_schema text,
+        dep_view text
+    )
+    AS $$
+    WITH RECURSIVE dep_graph (
+        level,
+        dep_schema,
+        dep_name,
+        dep_oid
+) AS (
+        SELECT
+            0,
+            n.nspname,
+            c.relname,
+            c.oid
+        FROM
+            pg_class c
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE
+            n.nspname = p_schema
+            AND c.relname = p_object
+        UNION
+        SELECT DISTINCT
+            dg.level + 1,
+            dep_ns.nspname,
+            dep_cl.relname,
+            dep_cl.oid
+        FROM
+            dep_graph dg
+            JOIN pg_depend d ON d.objid = dg.dep_oid
+            JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass
+                AND d.objid = rw.oid
+            JOIN pg_class dep_cl ON rw.ev_class = dep_cl.oid
+            JOIN pg_namespace dep_ns ON dep_cl.relnamespace = dep_ns.oid
+        WHERE
+            dep_cl.relkind IN ('v', 'm')
+            AND dep_cl.oid <> dg.dep_oid
+)
+    SELECT
+        max(level)::int,
+        dep_schema,
+        dep_name
+    FROM
+        dep_graph
+    GROUP BY
+        dep_schema,
+        dep_name
+    ORDER BY
+        max(level),
+        dep_schema,
+        dep_name;
+$$
+LANGUAGE sql
+STABLE STRICT;
+
+
