@@ -202,7 +202,7 @@ CREATE FUNCTION pgvc_dependency_order (p_schema text, p_object text)
             dep_cl.oid
         FROM
             dep_graph dg
-            JOIN pg_depend d ON d.objid = dg.dep_oid
+            JOIN pg_depend d ON d.refobjid = dg.dep_oid
             JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass
                 AND d.objid = rw.oid
             JOIN pg_class dep_cl ON rw.ev_class = dep_cl.oid
