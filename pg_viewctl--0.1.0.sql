@@ -243,3 +243,23 @@ WHERE
   AND c.relkind IN ('v', 'm');
 $$ LANGUAGE sql STABLE STRICT;
 
+CREATE FUNCTION pgvc_get_view_grants(p_schema text, p_view text)
+RETURNS TABLE (
+    grantee text,
+    privilege_type text,
+    is_grantable boolean
+) AS $$
+SELECT
+    COALESCE(r.rolname, 'PUBLIC'),
+    a.privilege_type,
+    a.is_grantable
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+CROSS JOIN LATERAL aclexplode(c.relacl) a
+LEFT JOIN pg_roles r ON a.grantee = r.oid
+WHERE n.nspname = p_schema
+  AND c.relname = p_view
+  AND c.relkind IN ('v', 'm')
+  AND a.grantee <> c.relowner
+$$ LANGUAGE sql STABLE STRICT;
+
