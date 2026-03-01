@@ -228,4 +228,18 @@ $$
 LANGUAGE sql
 STABLE STRICT;
 
+CREATE FUNCTION pgvc_get_view_definition(p_schema text, p_view text)
+RETURNS text AS $$
+SELECT
+    'CREATE ' || CASE c.relkind
+        WHEN 'm' THEN 'MATERIALIZED '
+        ELSE ''
+        END || 'VIEW ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || ' AS' || E'\n' || pg_get_viewdef(c.oid, true)
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE
+  n.nspname = p_schema
+  AND c.relname = p_view
+  AND c.relkind IN ('v', 'm');
+$$ LANGUAGE sql STABLE STRICT;
 
