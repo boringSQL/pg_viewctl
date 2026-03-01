@@ -1,4 +1,6 @@
 comment = 'pg_viewctl - view control utilities'
-default_version = '0.1.0'
+default_version = '@CARGO_VERSION@'
 module_pathname = '$libdir/pg_viewctl'
-relocatable = true
+relocatable = false
+superuser = false
+trusted = true
