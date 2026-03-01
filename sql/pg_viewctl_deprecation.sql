@@ -78,7 +78,9 @@ SELECT schema_name, view_name, column_name,
 FROM pgvc_deprecated_with_dependents
 ORDER BY view_name, column_name;
 
--- error: NULL required args
+-- error: NULL required args, nonexistent column/view
+BEGIN;
+
 SAVEPOINT sp1;
 SELECT deprecate_column(NULL, 'employee_summary', 'salary');
 ROLLBACK TO sp1;
@@ -91,15 +93,15 @@ SAVEPOINT sp3;
 SELECT deprecate_column('test_depr', 'employee_summary', NULL);
 ROLLBACK TO sp3;
 
--- error: nonexistent column
 SAVEPOINT sp4;
 SELECT deprecate_column('test_depr', 'employee_summary', 'no_such_column');
 ROLLBACK TO sp4;
 
--- error: nonexistent view
 SAVEPOINT sp5;
 SELECT deprecate_column('test_depr', 'no_such_view', 'salary');
 ROLLBACK TO sp5;
+
+COMMIT;
 
 -- teardown
 DROP SCHEMA test_depr CASCADE;
