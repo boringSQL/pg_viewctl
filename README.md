@@ -12,7 +12,23 @@ TBD proper documentation.
 
 ## Build
 
-Requires PostgreSQL dev headers.
+Migrating from C (PGXS) to Rust ([pgrx](https://github.com/pgcentralfoundation/pgrx)).
+
+### Rust (pgrx)
+
+Requires Rust toolchain and a local PostgreSQL install.
+
+```bash
+cargo install cargo-pgrx
+# adjust to local version
+cargo pgrx init --pg18=$(which pg_config)
+cargo pgrx test
+cargo pgrx run
+```
+
+### C (legacy)
+
+Requires PostgreSQL dev headers. Uses PGXS.
 
 ```bash
 make && make install && make installcheck
