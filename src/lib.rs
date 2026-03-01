@@ -11,11 +11,12 @@ fn check_column_deprecated(
 ) -> Option<String> {
     let query = include_str!("../sql_queries/check_column_deprecated.sql");
 
-    let args = vec![
+    let args = unsafe { vec![
         DatumWithOid::new(schema_name.into_datum(), PgBuiltInOids::TEXTOID.into()),
         DatumWithOid::new(view_name.into_datum(), PgBuiltInOids::TEXTOID.into()),
         DatumWithOid::new(column_name.into_datum(), PgBuiltInOids::TEXTOID.into()),
-    ];
+    ]
+    };
 
     Spi::connect(|client| {
         let row = client.select(query, Some(1), &args)?.first();
@@ -49,24 +50,43 @@ fn check_column_deprecated(
 mod tests {
     use pgrx::prelude::*;
 
-    #[pg_test]
-    fn test_hello_pg_viewctl() {
-        assert_eq!("Hello, pg_viewctl", crate::hello_pg_viewctl());
+    fn create_deprecated_columns_table() {
+        Spi::run(include_str!("../sql_queries/create_deprecated_columns.sql")).unwrap();
     }
 
+    #[pg_test]
+    fn test_check_not_deprecated() {
+        create_deprecated_columns_table();
+
+        let result = crate::check_column_deprecated("public", "test_view", "col1");
+        assert!(result.is_none());
+    }
+
+    #[pg_test]
+    fn test_check_deprecated_with_message() {
+        create_deprecated_columns_table();
+
+        Spi::run("INSERT INTO pgvc_deprecated_columns
+            (schema_name, view_name, column_name, deprecation_message, removal_date)
+            VALUES ('public', 'my_view', 'old_col', 'Use new_col instead', '2026-06-01')"
+        ).unwrap();
+
+        let result = crate::check_column_deprecated("public", "my_view", "old_col");
+        assert!(result.is_some());
+
+        let msg = result.unwrap();
+        assert!(msg.contains("is deprecated"));
+        assert!(msg.contains("Use new_col instead"));
+        assert!(msg.contains("2026-06-01"));
+    }
 }
 
-/// This module is required by `cargo pgrx test` invocations.
-/// It must be visible at the root of your extension crate.
 #[cfg(test)]
 pub mod pg_test {
-    pub fn setup(_options: Vec<&str>) {
-        // perform one-off initialization when the pg_test framework starts
-    }
+    pub fn setup(_options: Vec<&str>) {}
 
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        // return any postgresql.conf settings that are required for your tests
         vec![]
     }
 }
