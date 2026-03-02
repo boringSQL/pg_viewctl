@@ -52,6 +52,47 @@ fn check_column_deprecated(
     .unwrap_or(None)
 }
 
+#[pg_extern]
+fn deprecate_column(
+    schema_name: &str,
+    view_name: &str,
+    column_name: &str,
+    message: Option<&str>,
+    removal_date: Option<Date>,
+) -> String {
+    let validate_sql = include_str!("../sql_queries/validate_column_exists.sql");
+    let upsert_sql = include_str!("../sql_queries/deprecate_column_upsert.sql");
+
+    Spi::connect(|client| {
+        let validate_args = vec![
+            text_arg(schema_name),
+            text_arg(view_name),
+            text_arg(column_name),
+        ];
+
+        let rows = client.select(validate_sql, Some(1), &validate_args)?;
+        if rows.len() == 0 {
+            pgrx::error!(
+                "column {schema_name}.{view_name}.{column_name} does not exist on any view or materialized view"
+            );
+        }
+
+        let upsert_args = vec![
+            text_arg(schema_name),
+            text_arg(view_name),
+            text_arg(column_name),
+            optional_text_arg(message),
+            optional_date_arg(removal_date),
+        ];
+        client.select(upsert_sql, None, &upsert_args)?;
+
+        Ok::<_, spi::SpiError>(format!(
+            "column {schema_name}.{view_name}.{column_name} deprecated"
+        ))
+    })
+    .unwrap()
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
