@@ -94,6 +94,42 @@ fn deprecate_column(
 }
 
 #[pg_extern]
+fn get_column_dependencies(
+    schema_name: &str,
+    object_name: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(dependent_schema, Option<String>),
+        name!(dependent_view, Option<String>),
+        name!(dependent_column, Option<String>),
+        name!(source_column, Option<String>),
+        name!(dependency_type, Option<String>),
+    ),
+> {
+    let query = include_str!("../sql_queries/get_column_deps.sql");
+    let args = vec![text_arg(schema_name), text_arg(object_name)];
+
+    let rows = Spi::connect(|client| {
+        let tuptable = client.select(query, None, &args)?;
+        let mut rows = Vec::new();
+        for row in tuptable {
+            rows.push((
+                row.get_by_name::<String, _>("dependent_schema")?,
+                row.get_by_name::<String, _>("dependent_view")?,
+                row.get_by_name::<String, _>("dependent_column")?,
+                row.get_by_name::<String, _>("source_column")?,
+                row.get_by_name::<String, _>("dependency_type")?,
+            ));
+        }
+        Ok::<_, spi::SpiError>(rows)
+    })
+    .unwrap_or_default();
+
+    TableIterator::new(rows)
+}
+
+#[pg_extern]
 fn undeprecate_column(
     schema_name: &str,
     view_name: &str,
@@ -123,11 +159,11 @@ mod tests {
     use pgrx::prelude::*;
 
     fn create_deprecated_columns_table() {
-        Spi::run(include_str!("../sql_queries/create_deprecated_columns.sql")).unwrap();
+        Spi::run(include_str!("../sql_queries/tests/create_deprecated_columns.sql")).unwrap();
     }
 
     fn create_test_view() {
-        Spi::run(include_str!("../sql_queries/create_test_view.sql")).unwrap();
+        Spi::run(include_str!("../sql_queries/tests/create_test_view.sql")).unwrap();
     }
 
     #[pg_test]
@@ -142,7 +178,7 @@ mod tests {
     fn test_check_deprecated_with_message() {
         create_deprecated_columns_table();
 
-        Spi::run(include_str!("../sql_queries/insert_test_deprecated_column.sql")).unwrap();
+        Spi::run(include_str!("../sql_queries/tests/insert_test_deprecated_column.sql")).unwrap();
 
         let result = crate::check_column_deprecated("public", "my_view", "old_col");
         assert!(result.is_some());
@@ -178,6 +214,68 @@ mod tests {
 
         let result = crate::undeprecate_column("public", "test_view", "col1");
         assert_eq!(result, "column public.test_view.col1 was not marked as deprecated");
+    }
+
+    fn create_dependency_fixtures() {
+        Spi::run(include_str!("../sql_queries/tests/create_dependency_fixtures.sql")).unwrap();
+    }
+
+    #[pg_test]
+    fn test_get_column_deps_found() {
+        create_dependency_fixtures();
+
+        let results: Vec<_> = crate::get_column_dependencies("public", "test_base")
+            .collect();
+
+        let dep_views: Vec<_> = results.iter().filter_map(|r| r.1.as_deref()).collect();
+        assert!(
+            dep_views.contains(&"test_dep_view"),
+            "expected test_dep_view in {:?}, got {} results", dep_views, results.len()
+        );
+
+        let source_cols: Vec<_> = results.iter().filter_map(|r| r.3.as_deref()).collect();
+        assert!(source_cols.contains(&"id"));
+        assert!(source_cols.contains(&"name"));
+    }
+
+    #[pg_test]
+    fn test_get_column_deps_leaf_view() {
+        create_dependency_fixtures();
+
+        let count = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT count(*) AS cnt FROM get_column_dependencies($1, $2)",
+                    None,
+                    &[crate::text_arg("public"), crate::text_arg("test_dep_view")],
+                )
+                .map(|tuptable| {
+                    tuptable.first().get_by_name::<i64, _>("cnt").unwrap().unwrap_or(0)
+                })
+        })
+        .unwrap();
+
+        assert_eq!(count, 0);
+    }
+
+    #[pg_test]
+    fn test_get_column_deps_nonexistent() {
+        create_dependency_fixtures();
+
+        let count = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT count(*) AS cnt FROM get_column_dependencies($1, $2)",
+                    None,
+                    &[crate::text_arg("public"), crate::text_arg("no_such_thing")],
+                )
+                .map(|tuptable| {
+                    tuptable.first().get_by_name::<i64, _>("cnt").unwrap().unwrap_or(0)
+                })
+        })
+        .unwrap();
+
+        assert_eq!(count, 0);
     }
 
     #[pg_test]
