@@ -1,7 +1,7 @@
-SELECT dep_ns.nspname AS dependent_schema,
-       dep_cl.relname AS dependent_view,
-       COALESCE(dep_at.attname, src_at.attname) AS dependent_column,
-       src_at.attname AS source_column,
+SELECT dep_ns.nspname::text AS dependent_schema,
+       dep_cl.relname::text AS dependent_view,
+       COALESCE(dep_at.attname, src_at.attname)::text AS dependent_column,
+       src_at.attname::text AS source_column,
        pgvc_map_deptype(d.deptype) AS dependency_type
 FROM pg_depend d
 JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass
