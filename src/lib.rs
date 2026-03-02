@@ -93,6 +93,30 @@ fn deprecate_column(
     .unwrap()
 }
 
+#[pg_extern]
+fn undeprecate_column(
+    schema_name: &str,
+    view_name: &str,
+    column_name: &str,
+) -> String {
+    let query = include_str!("../sql_queries/undeprecate_column.sql");
+    let args = vec![text_arg(schema_name), text_arg(view_name), text_arg(column_name)];
+
+    Spi::connect(|client| {
+        let rows = client.select(query, None, &args)?;
+        if rows.len() > 0 {
+            Ok::<_, spi::SpiError>(format!(
+                "column {schema_name}.{view_name}.{column_name} undeprecated"
+            ))
+        } else {
+            Ok(format!(
+                "column {schema_name}.{view_name}.{column_name} was not marked as deprecated"
+            ))
+        }
+    })
+    .unwrap()
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
@@ -136,6 +160,24 @@ mod tests {
 
         let result = crate::deprecate_column("public", "test_view", "old_col", Some("Use new_col"), None);
         assert_eq!(result, "column public.test_view.old_col deprecated");
+    }
+
+    #[pg_test]
+    fn test_undeprecate_column() {
+        create_deprecated_columns_table();
+        create_test_view();
+
+        crate::deprecate_column("public", "test_view", "old_col", Some("going away"), None);
+        let result = crate::undeprecate_column("public", "test_view", "old_col");
+        assert_eq!(result, "column public.test_view.old_col undeprecated");
+    }
+
+    #[pg_test]
+    fn test_undeprecate_not_deprecated() {
+        create_deprecated_columns_table();
+
+        let result = crate::undeprecate_column("public", "test_view", "col1");
+        assert_eq!(result, "column public.test_view.col1 was not marked as deprecated");
     }
 
     #[pg_test]
