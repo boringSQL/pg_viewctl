@@ -1,5 +1,17 @@
 use pgrx::prelude::*;
-use pgrx::datum::DatumWithOid;
+use pgrx::datum::{Date, DatumWithOid};
+
+fn text_arg(val: &str) -> DatumWithOid<'_> {
+    unsafe { DatumWithOid::new(val.into_datum(), PgBuiltInOids::TEXTOID.into()) }
+}
+
+fn optional_text_arg(val: Option<&str>) -> DatumWithOid<'_> {
+    unsafe { DatumWithOid::new(val.into_datum(), PgBuiltInOids::TEXTOID.into()) }
+}
+
+fn optional_date_arg(val: Option<Date>) -> DatumWithOid<'static> {
+    unsafe { DatumWithOid::new(val.into_datum(), PgBuiltInOids::DATEOID.into()) }
+}
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -11,12 +23,7 @@ fn check_column_deprecated(
 ) -> Option<String> {
     let query = include_str!("../sql_queries/check_column_deprecated.sql");
 
-    let args = unsafe { vec![
-        DatumWithOid::new(schema_name.into_datum(), PgBuiltInOids::TEXTOID.into()),
-        DatumWithOid::new(view_name.into_datum(), PgBuiltInOids::TEXTOID.into()),
-        DatumWithOid::new(column_name.into_datum(), PgBuiltInOids::TEXTOID.into()),
-    ]
-    };
+    let args = vec![text_arg(schema_name), text_arg(view_name), text_arg(column_name)];
 
     Spi::connect(|client| {
         let row = client.select(query, Some(1), &args)?.first();
