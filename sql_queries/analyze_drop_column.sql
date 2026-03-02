@@ -4,7 +4,7 @@ WITH target_view AS (
     JOIN pg_namespace n ON c.relnamespace = n.oid
     WHERE n.nspname = $1
       AND c.relname = $2
-      AND c.relkind IN ('v', 'm')
+      AND c.relkind IN ('r', 'v', 'm')
 ),
 target_column AS (
     SELECT a.attnum, a.attname
@@ -15,9 +15,9 @@ target_column AS (
       AND a.attnum > 0
 ),
 column_deps AS (
-    SELECT dep_ns.nspname AS dependent_schema,
-           dep_cl.relname AS dependent_view,
-           COALESCE(dep_at.attname, tc.attname) AS dependent_column,
+    SELECT dep_ns.nspname::text AS dependent_schema,
+           dep_cl.relname::text AS dependent_view,
+           COALESCE(dep_at.attname, tc.attname)::text AS dependent_column,
            d.deptype
     FROM pg_depend d
     JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass
