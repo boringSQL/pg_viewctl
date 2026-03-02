@@ -102,6 +102,10 @@ mod tests {
         Spi::run(include_str!("../sql_queries/create_deprecated_columns.sql")).unwrap();
     }
 
+    fn create_test_view() {
+        Spi::run(include_str!("../sql_queries/create_test_view.sql")).unwrap();
+    }
+
     #[pg_test]
     fn test_check_not_deprecated() {
         create_deprecated_columns_table();
@@ -114,10 +118,7 @@ mod tests {
     fn test_check_deprecated_with_message() {
         create_deprecated_columns_table();
 
-        Spi::run("INSERT INTO pgvc_deprecated_columns
-            (schema_name, view_name, column_name, deprecation_message, removal_date)
-            VALUES ('public', 'my_view', 'old_col', 'Use new_col instead', '2026-06-01')"
-        ).unwrap();
+        Spi::run(include_str!("../sql_queries/insert_test_deprecated_column.sql")).unwrap();
 
         let result = crate::check_column_deprecated("public", "my_view", "old_col");
         assert!(result.is_some());
@@ -126,6 +127,34 @@ mod tests {
         assert!(msg.contains("is deprecated"));
         assert!(msg.contains("Use new_col instead"));
         assert!(msg.contains("2026-06-01"));
+    }
+
+    #[pg_test]
+    fn test_deprecate_column() {
+        create_deprecated_columns_table();
+        create_test_view();
+
+        let result = crate::deprecate_column("public", "test_view", "old_col", Some("Use new_col"), None);
+        assert_eq!(result, "column public.test_view.old_col deprecated");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "does not exist")]
+    fn test_deprecate_nonexistent_column() {
+        create_deprecated_columns_table();
+        create_test_view();
+
+        crate::deprecate_column("public", "test_view", "no_such_col", None, None);
+    }
+
+    #[pg_test]
+    fn test_deprecate_upsert() {
+        create_deprecated_columns_table();
+        create_test_view();
+
+        crate::deprecate_column("public", "test_view", "old_col", Some("first msg"), None);
+        let result = crate::deprecate_column("public", "test_view", "old_col", Some("updated msg"), None);
+        assert_eq!(result, "column public.test_view.old_col deprecated");
     }
 }
 
