@@ -357,6 +357,66 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_analyze_drop_found() {
+        create_dependency_fixtures();
+
+        let results: Vec<_> = crate::analyze_drop_column("public", "test_base", "name")
+            .collect();
+
+        assert!(!results.is_empty(), "expected results for dropping test_base.name");
+
+        let dep_views: Vec<_> = results.iter().filter_map(|r| r.0.as_deref()).collect();
+        assert!(
+            dep_views.contains(&"test_dep_view"),
+            "expected test_dep_view in {:?}", dep_views
+        );
+
+        let severities: Vec<_> = results.iter().filter_map(|r| r.3.as_deref()).collect();
+        assert!(severities.contains(&"BREAKING"));
+    }
+
+    #[pg_test]
+    fn test_analyze_drop_leaf() {
+        create_dependency_fixtures();
+
+        let results: Vec<_> = crate::analyze_drop_column("public", "test_dep_view", "name")
+            .collect();
+
+        assert!(results.is_empty(), "leaf view should have no dependents");
+    }
+
+    #[pg_test]
+    fn test_analyze_drop_nonexistent() {
+        create_dependency_fixtures();
+
+        let results: Vec<_> = crate::analyze_drop_column("public", "test_base", "no_such_col")
+            .collect();
+
+        assert!(results.is_empty(), "nonexistent column should return empty set");
+    }
+
+    #[pg_test]
+    fn test_get_deprecated_columns() {
+        create_deprecated_columns_table();
+        create_test_view();
+
+        crate::deprecate_column("public", "test_view", "old_col", Some("Use new_col"), None);
+
+        let results: Vec<_> = crate::get_deprecated_columns(Some("public")).collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.as_deref(), Some("test_view"));
+        assert_eq!(results[0].2.as_deref(), Some("old_col"));
+    }
+
+    #[pg_test]
+    fn test_get_deprecated_columns_empty() {
+        create_deprecated_columns_table();
+
+        let results: Vec<_> = crate::get_deprecated_columns(None).collect();
+        assert!(results.is_empty());
+    }
+
+    #[pg_test]
     #[should_panic(expected = "does not exist")]
     fn test_deprecate_nonexistent_column() {
         create_deprecated_columns_table();
