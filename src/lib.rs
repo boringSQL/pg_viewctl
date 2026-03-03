@@ -153,6 +153,84 @@ fn undeprecate_column(
     .unwrap()
 }
 
+#[pg_extern]
+fn analyze_drop_column(
+    schema_name: &str,
+    view_name: &str,
+    column_name: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(dependent_view, Option<String>),
+        name!(dependent_column, Option<String>),
+        name!(usage_type, Option<String>),
+        name!(impact_severity, Option<String>),
+        name!(usage_location, Option<String>),
+    ),
+> {
+    let query = include_str!("../sql_queries/analyze_drop_column.sql");
+    let args = vec![
+        text_arg(schema_name),
+        text_arg(view_name),
+        text_arg(column_name),
+    ];
+
+    let rows = Spi::connect(|client| {
+        let tuptable = client.select(query, None, &args)?;
+        let mut rows = Vec::new();
+        for row in tuptable {
+            rows.push((
+                row.get_by_name::<String, _>("dependent_view")?,
+                row.get_by_name::<String, _>("dependent_column")?,
+                row.get_by_name::<String, _>("usage_type")?,
+                row.get_by_name::<String, _>("impact_severity")?,
+                row.get_by_name::<String, _>("usage_location")?,
+            ));
+        }
+        Ok::<_, spi::SpiError>(rows)
+    })
+    .unwrap_or_default();
+
+    TableIterator::new(rows)
+}
+
+#[pg_extern]
+fn get_deprecated_columns(
+    schema_filter: Option<&str>,
+) -> TableIterator<
+    'static,
+    (
+        name!(schema_name, Option<String>),
+        name!(view_name, Option<String>),
+        name!(column_name, Option<String>),
+        name!(deprecation_message, Option<String>),
+        name!(removal_date, Option<String>),
+        name!(deprecated_at, Option<String>),
+    ),
+> {
+    let query = include_str!("../sql_queries/get_deprecated_columns.sql");
+    let args = vec![optional_text_arg(schema_filter)];
+
+    let rows = Spi::connect(|client| {
+        let tuptable = client.select(query, None, &args)?;
+        let mut rows = Vec::new();
+        for row in tuptable {
+            rows.push((
+                row.get_by_name::<String, _>("schema_name")?,
+                row.get_by_name::<String, _>("view_name")?,
+                row.get_by_name::<String, _>("column_name")?,
+                row.get_by_name::<String, _>("deprecation_message")?,
+                row.get_by_name::<String, _>("removal_date")?,
+                row.get_by_name::<String, _>("deprecated_at")?,
+            ));
+        }
+        Ok::<_, spi::SpiError>(rows)
+    })
+    .unwrap_or_default();
+
+    TableIterator::new(rows)
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
