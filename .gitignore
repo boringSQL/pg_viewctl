@@ -1,11 +1,1 @@
-*.o
-*.so
-*.dylib
-*.bc
-sql_queries.h
-.deps
-results/
-regression.diffs
-regression.out
-tmp_check/
 target/

@@ -91,69 +91,6 @@ GROUP BY
     dc.deprecated_at
 ORDER BY dc.schema_name, dc.view_name, dc.column_name;
 
-CREATE FUNCTION get_column_dependencies(
-    schema_name text,
-    object_name text
-) RETURNS TABLE (
-    dependent_schema text,
-    dependent_view   text,
-    dependent_column text,
-    source_column    text,
-    dependency_type  text
-) AS 'MODULE_PATHNAME', 'get_column_dependencies'
-LANGUAGE C STRICT;
-
-CREATE FUNCTION analyze_drop_column(
-    schema_name text,
-    view_name   text,
-    column_name text
-) RETURNS TABLE (
-    dependent_view    text,
-    dependent_column  text,
-    usage_type        text,
-    impact_severity   text,
-    usage_location    text
-) AS 'MODULE_PATHNAME', 'analyze_drop_column'
-LANGUAGE C STRICT;
-
-CREATE FUNCTION deprecate_column(
-    schema_name  text,
-    view_name    text,
-    column_name  text,
-    message      text DEFAULT NULL,
-    removal_date date DEFAULT NULL
-) RETURNS text
-AS 'MODULE_PATHNAME', 'deprecate_column'
-LANGUAGE C;
-
-CREATE FUNCTION undeprecate_column(
-    schema_name text,
-    view_name   text,
-    column_name text
-) RETURNS text
-AS 'MODULE_PATHNAME', 'undeprecate_column'
-LANGUAGE C STRICT;
-
-CREATE FUNCTION get_deprecated_columns(
-    schema_filter text DEFAULT NULL
-) RETURNS TABLE (
-    schema_name         text,
-    view_name           text,
-    column_name         text,
-    deprecation_message text,
-    removal_date        text,
-    deprecated_at       text
-) AS 'MODULE_PATHNAME', 'get_deprecated_columns'
-LANGUAGE C;
-
-CREATE FUNCTION check_column_deprecated(
-    schema_name text,
-    view_name   text,
-    column_name text
-) RETURNS text
-AS 'MODULE_PATHNAME', 'check_column_deprecated'
-LANGUAGE C STRICT;
-
 CREATE FUNCTION pgvc_analyze_drop_report(
     p_schema_name text,
     p_view_name   text,
