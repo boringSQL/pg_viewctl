@@ -200,3 +200,8 @@ WHERE n.nspname = p_schema
   AND a.grantee <> c.relowner
 $$ LANGUAGE sql STABLE STRICT;
 
+CREATE FUNCTION pgvc_generate_replace_view(p_schema text, p_view text, p_new_definition text)
+RETURNS TABLE(step int, operation text, sql text) AS $$
+    SELECT step, operation, sql FROM generate_replace_view(p_schema, p_view, p_new_definition);
+$$ LANGUAGE sql STABLE STRICT;
+
