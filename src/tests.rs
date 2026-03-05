@@ -950,6 +950,32 @@ fn test_generate_rename_view_column_column_list() {
     assert!(!sql.contains("(\"name\"") && !sql.contains(", \"name\""), "CREATE should not use old column name 'name' in column list");
 }
 
+#[pg_test]
+fn test_generate_rename_view_column_no_substring_rename() {
+    create_rename_view_column_fixtures();
+
+    // rvc_dep_l1 has columns (id, name) — renaming 'id' must not affect 'id' substring
+    // in other column names. Use a view with overlapping column names to test.
+    Spi::run("CREATE TABLE public.rvc_substr_base (id int, uid int, name text, username text)").unwrap();
+    Spi::run("CREATE VIEW public.rvc_substr_view AS SELECT id, uid, name, username FROM public.rvc_substr_base").unwrap();
+
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_substr_view", "name", "display_name",
+    ).collect();
+
+    let target_create = results
+        .iter()
+        .find(|r| {
+            r.2.as_deref().map(|s| s.contains("rvc_substr_view") && s.starts_with("CREATE")).unwrap_or(false)
+        });
+
+    assert!(target_create.is_some(), "expected CREATE for rvc_substr_view");
+    let sql = target_create.unwrap().2.as_deref().unwrap();
+
+    // 'username' must survive — only exact 'name' should become 'display_name'
+    assert!(sql.contains("\"username\""), "username column must not be renamed, got: {sql}");
+    assert!(sql.contains("\"display_name\""), "name should become display_name, got: {sql}");
+}
 
 #[pg_test]
 fn test_generate_rename_view_column_todo_marker() {
