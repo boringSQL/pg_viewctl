@@ -713,7 +713,7 @@ pub fn generate_rename_view_column(
         let renamed_columns: Vec<String> = columns
             .iter()
             .map(|c| {
-                if c.contains(old_column) {
+                if c == old_column {
                     pg_quote_ident(new_column)
                 } else {
                     pg_quote_ident(c)
