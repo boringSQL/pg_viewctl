@@ -1,5 +1,6 @@
 use pgrx::prelude::*;
 use pgrx::datum::{Date, DatumWithOid};
+use pgrx::spi::SpiClient;
 
 pub(crate) fn text_arg(val: &str) -> DatumWithOid<'_> {
     unsafe { DatumWithOid::new(val.into_datum(), PgBuiltInOids::TEXTOID.into()) }
@@ -22,6 +23,165 @@ struct DepInfo {
     dep_view: String,
     view_kind: String,
     view_def: String,
+}
+
+impl DepInfo {
+    fn qualified_name(&self) -> String {
+        format!(
+            "{}.{}",
+            pg_quote_ident(&self.dep_schema),
+            pg_quote_ident(&self.dep_view),
+        )
+    }
+
+    fn kind_label(&self) -> &'static str {
+        if self.view_kind == "m" {
+            "MATERIALIZED VIEW"
+        } else {
+            "VIEW"
+        }
+    }
+}
+
+type StepRow = (i32, Option<String>, Option<String>);
+
+struct MigrationPlan {
+    steps: Vec<StepRow>,
+    step_num: i32,
+}
+
+impl MigrationPlan {
+    fn new() -> Self {
+        Self {
+            steps: Vec::new(),
+            step_num: 1,
+        }
+    }
+
+    fn add(&mut self, operation: &str, sql: String) {
+        self.steps
+            .push((self.step_num, Some(operation.to_string()), Some(sql)));
+        self.step_num += 1;
+    }
+
+    fn drop_dependents(&mut self, deps: &[DepInfo]) {
+        for dep in deps.iter().rev() {
+            let kind = dep.kind_label();
+            let qualified = dep.qualified_name();
+            self.add(
+                &format!("DROP {kind}"),
+                format!("DROP {kind} IF EXISTS {qualified}"),
+            );
+        }
+    }
+
+    fn create_dependents(
+        &mut self,
+        deps: &[DepInfo],
+        annotate: impl Fn(&DepInfo) -> Option<String>,
+    ) {
+        for dep in deps {
+            let create_sql = match annotate(dep) {
+                Some(comment) => format!("{comment}\n{}", dep.view_def),
+                None => dep.view_def.clone(),
+            };
+            self.add(&format!("CREATE {}", dep.kind_label()), create_sql);
+        }
+    }
+
+    fn restore_grants(&mut self, grants: &[String]) {
+        for grant in grants {
+            self.add("GRANT", grant.clone());
+        }
+    }
+
+    fn refresh_matviews(&mut self, qualified_target: Option<&str>, deps: &[DepInfo]) {
+        if let Some(target) = qualified_target {
+            self.add(
+                "REFRESH MATERIALIZED VIEW",
+                format!("REFRESH MATERIALIZED VIEW {target}"),
+            );
+        }
+        for dep in deps {
+            if dep.view_kind == "m" {
+                self.add(
+                    "REFRESH MATERIALIZED VIEW",
+                    format!("REFRESH MATERIALIZED VIEW {}", dep.qualified_name()),
+                );
+            }
+        }
+    }
+
+    fn into_table_iter(
+        self,
+    ) -> TableIterator<
+        'static,
+        (
+            name!(step, i32),
+            name!(operation, Option<String>),
+            name!(sql, Option<String>),
+        ),
+    > {
+        TableIterator::new(self.steps)
+    }
+}
+
+fn fetch_deps(
+    client: &SpiClient<'_>,
+    sql: &str,
+    args: &[DatumWithOid],
+) -> Result<Vec<DepInfo>, spi::SpiError> {
+    let rows = client.select(sql, None, args)?;
+    let mut deps = Vec::new();
+    for row in rows {
+        deps.push(DepInfo {
+            dep_schema: row.get_by_name::<String, _>("dep_schema")?.unwrap_or_default(),
+            dep_view: row.get_by_name::<String, _>("dep_view")?.unwrap_or_default(),
+            view_kind: row.get_by_name::<String, _>("view_kind")?.unwrap_or_default(),
+            view_def: row.get_by_name::<String, _>("view_def")?.unwrap_or_default(),
+        });
+    }
+    Ok(deps)
+}
+
+fn fetch_col_refs(
+    client: &SpiClient<'_>,
+    sql: &str,
+    args: &[DatumWithOid],
+) -> Result<Vec<(String, String)>, spi::SpiError> {
+    let rows = client.select(sql, None, args)?;
+    let mut refs = Vec::new();
+    for row in rows {
+        refs.push((
+            row.get_by_name::<String, _>("dep_schema")?.unwrap_or_default(),
+            row.get_by_name::<String, _>("dep_view")?.unwrap_or_default(),
+        ));
+    }
+    Ok(refs)
+}
+
+fn fetch_grants(
+    client: &SpiClient<'_>,
+    sql: &str,
+    args: &[DatumWithOid],
+) -> Result<Vec<String>, spi::SpiError> {
+    let rows = client.select(sql, None, args)?;
+    let mut grants = Vec::new();
+    for row in rows {
+        if let Some(sql) = row.get_by_name::<String, _>("grant_sql")? {
+            grants.push(sql);
+        }
+    }
+    Ok(grants)
+}
+
+fn dep_references_column(
+    col_refs: &[(String, String)],
+    dep: &DepInfo,
+) -> bool {
+    col_refs
+        .iter()
+        .any(|(s, v)| s == &dep.dep_schema && v == &dep.dep_view)
 }
 
 #[pg_extern]
@@ -266,43 +426,18 @@ pub fn generate_replace_view(
 
     let args = vec![text_arg(schema_name), text_arg(view_name)];
 
-    let steps = Spi::connect(|client| {
-        // 1. validate target exists, get relkind
+    Spi::connect(|client| {
         let target_row = client.select(target_kind_sql, Some(1), &args)?;
         if target_row.len() == 0 {
-            pgrx::error!(
-                "view {schema_name}.{view_name} does not exist"
-            );
+            pgrx::error!("view {schema_name}.{view_name} does not exist");
         }
         let target_kind: String = target_row
             .first()
             .get_by_name::<String, _>("view_kind")?
             .unwrap_or_default();
 
-        // 2. fetch dependents
-        let dep_rows = client.select(deps_sql, None, &args)?;
-        let mut deps: Vec<DepInfo> = Vec::new();
-        for row in dep_rows {
-            deps.push(DepInfo {
-                dep_schema: row.get_by_name::<String, _>("dep_schema")?.unwrap_or_default(),
-                dep_view: row.get_by_name::<String, _>("dep_view")?.unwrap_or_default(),
-                view_kind: row.get_by_name::<String, _>("view_kind")?.unwrap_or_default(),
-                view_def: row.get_by_name::<String, _>("view_def")?.unwrap_or_default(),
-            });
-        }
-
-        // 3. fetch grants
-        let grant_rows = client.select(grants_sql, None, &args)?;
-        let mut grants: Vec<String> = Vec::new();
-        for row in grant_rows {
-            if let Some(sql) = row.get_by_name::<String, _>("grant_sql")? {
-                grants.push(sql);
-            }
-        }
-
-        // 4. compile necessary steps
-        let mut steps: Vec<(i32, Option<String>, Option<String>)> = Vec::new();
-        let mut step_num: i32 = 1;
+        let deps = fetch_deps(&client, deps_sql, &args)?;
+        let grants = fetch_grants(&client, grants_sql, &args)?;
 
         let qualified_target = format!(
             "{}.{}",
@@ -310,117 +445,46 @@ pub fn generate_replace_view(
             pg_quote_ident(view_name)
         );
 
-        // DROP dependents leaf-first (descending level)
-        for dep in deps.iter().rev() {
-            let qualified = format!(
-                "{}.{}",
-                pg_quote_ident(&dep.dep_schema),
-                pg_quote_ident(&dep.dep_view)
-            );
-            let drop_kind = if dep.view_kind == "m" {
-                "MATERIALIZED VIEW"
-            } else {
-                "VIEW"
-            };
-            steps.push((
-                step_num,
-                Some(format!("DROP {drop_kind}")),
-                Some(format!("DROP {drop_kind} IF EXISTS {qualified}")),
-            ));
-            step_num += 1;
-        }
+        let mut plan = MigrationPlan::new();
+        plan.drop_dependents(&deps);
 
-        // Replace the target view
         // DROP+CREATE when matview or when dependents exist (column list may change)
         // CREATE OR REPLACE only when standalone regular view (safe, preserves grants)
         let needs_drop = target_kind == "m" || !deps.is_empty();
         if needs_drop {
-            let drop_kind = if target_kind == "m" {
+            let kind = if target_kind == "m" {
                 "MATERIALIZED VIEW"
             } else {
                 "VIEW"
             };
-            let create_kind = drop_kind;
-            steps.push((
-                step_num,
-                Some(format!("DROP {drop_kind}")),
-                Some(format!("DROP {drop_kind} IF EXISTS {qualified_target}")),
-            ));
-            step_num += 1;
-            steps.push((
-                step_num,
-                Some(format!("CREATE {create_kind}")),
-                Some(format!(
-                    "CREATE {create_kind} {qualified_target} AS\n{trimmed}"
-                )),
-            ));
-            step_num += 1;
+            plan.add(
+                &format!("DROP {kind}"),
+                format!("DROP {kind} IF EXISTS {qualified_target}"),
+            );
+            plan.add(
+                &format!("CREATE {kind}"),
+                format!("CREATE {kind} {qualified_target} AS\n{trimmed}"),
+            );
         } else {
-            steps.push((
-                step_num,
-                Some("CREATE OR REPLACE VIEW".to_string()),
-                Some(format!(
-                    "CREATE OR REPLACE VIEW {qualified_target} AS\n{trimmed}"
-                )),
-            ));
-            step_num += 1;
+            plan.add(
+                "CREATE OR REPLACE VIEW",
+                format!("CREATE OR REPLACE VIEW {qualified_target} AS\n{trimmed}"),
+            );
         }
 
-        // CREATE dependents base-first (ascending level)
-        for dep in &deps {
-            steps.push((
-                step_num,
-                Some(if dep.view_kind == "m" {
-                    "CREATE MATERIALIZED VIEW".to_string()
-                } else {
-                    "CREATE VIEW".to_string()
-                }),
-                Some(dep.view_def.clone()),
-            ));
-            step_num += 1;
-        }
+        plan.create_dependents(&deps, |_| None);
+        plan.restore_grants(&grants);
 
-        // GRANT for all views that had grants
-        for grant in &grants {
-            steps.push((
-                step_num,
-                Some("GRANT".to_string()),
-                Some(grant.clone()),
-            ));
-            step_num += 1;
-        }
+        let target_refresh = if target_kind == "m" {
+            Some(qualified_target.as_str())
+        } else {
+            None
+        };
+        plan.refresh_matviews(target_refresh, &deps);
 
-        // REFRESH MATERIALIZED VIEW for matviews
-        // TODO: flag based?
-        if target_kind == "m" {
-            steps.push((
-                step_num,
-                Some("REFRESH MATERIALIZED VIEW".to_string()),
-                Some(format!("REFRESH MATERIALIZED VIEW {qualified_target}")),
-            ));
-            step_num += 1;
-        }
-        for dep in &deps {
-            if dep.view_kind == "m" {
-                let qualified = format!(
-                    "{}.{}",
-                    pg_quote_ident(&dep.dep_schema),
-                    pg_quote_ident(&dep.dep_view)
-                );
-                steps.push((
-                    step_num,
-                    Some("REFRESH MATERIALIZED VIEW".to_string()),
-                    Some(format!("REFRESH MATERIALIZED VIEW {qualified}")),
-                ));
-                step_num += 1;
-            }
-        }
-
-        Ok::<_, spi::SpiError>(steps)
+        Ok::<_, spi::SpiError>(plan.into_table_iter())
     })
-    .unwrap();
-
-    TableIterator::new(steps)
+    .unwrap()
 }
 
 #[pg_extern]
@@ -447,8 +511,7 @@ pub fn generate_drop_column(
         text_arg(column_name),
     ];
 
-    let steps = Spi::connect(|client| {
-        // 1. validate table+column exist on a base table
+    Spi::connect(|client| {
         let validate_rows = client.select(validate_sql, Some(1), &col_args)?;
         if validate_rows.len() == 0 {
             pgrx::error!(
@@ -456,40 +519,9 @@ pub fn generate_drop_column(
             );
         }
 
-        // 2. fetch column-level dependent views with definitions
-        let dep_rows = client.select(deps_sql, None, &col_args)?;
-        let mut deps: Vec<DepInfo> = Vec::new();
-        for row in dep_rows {
-            deps.push(DepInfo {
-                dep_schema: row.get_by_name::<String, _>("dep_schema")?.unwrap_or_default(),
-                dep_view: row.get_by_name::<String, _>("dep_view")?.unwrap_or_default(),
-                view_kind: row.get_by_name::<String, _>("view_kind")?.unwrap_or_default(),
-                view_def: row.get_by_name::<String, _>("view_def")?.unwrap_or_default(),
-            });
-        }
-
-        // 3. identify which views directly reference the dropped column
-        let col_ref_rows = client.select(col_refs_sql, None, &col_args)?;
-        let mut col_ref_views: Vec<(String, String)> = Vec::new();
-        for row in col_ref_rows {
-            col_ref_views.push((
-                row.get_by_name::<String, _>("dep_schema")?.unwrap_or_default(),
-                row.get_by_name::<String, _>("dep_view")?.unwrap_or_default(),
-            ));
-        }
-
-        // 4. fetch grants for affected views
-        let grant_rows = client.select(grants_sql, None, &col_args)?;
-        let mut grants: Vec<String> = Vec::new();
-        for row in grant_rows {
-            if let Some(sql) = row.get_by_name::<String, _>("grant_sql")? {
-                grants.push(sql);
-            }
-        }
-
-        // 5. generate steps
-        let mut steps: Vec<(i32, Option<String>, Option<String>)> = Vec::new();
-        let mut step_num: i32 = 1;
+        let deps = fetch_deps(&client, deps_sql, &col_args)?;
+        let col_refs = fetch_col_refs(&client, col_refs_sql, &col_args)?;
+        let grants = fetch_grants(&client, grants_sql, &col_args)?;
 
         let qualified_table = format!(
             "{}.{}",
@@ -497,94 +529,27 @@ pub fn generate_drop_column(
             pg_quote_ident(table_name)
         );
 
-        // DROP dependent views leaf-first (descending level)
-        for dep in deps.iter().rev() {
-            let qualified = format!(
-                "{}.{}",
-                pg_quote_ident(&dep.dep_schema),
-                pg_quote_ident(&dep.dep_view)
-            );
-            let drop_kind = if dep.view_kind == "m" {
-                "MATERIALIZED VIEW"
-            } else {
-                "VIEW"
-            };
-            steps.push((
-                step_num,
-                Some(format!("DROP {drop_kind}")),
-                Some(format!("DROP {drop_kind} IF EXISTS {qualified}")),
-            ));
-            step_num += 1;
-        }
-
-        // ALTER TABLE DROP COLUMN
-        steps.push((
-            step_num,
-            Some("ALTER TABLE".to_string()),
-            Some(format!(
+        let mut plan = MigrationPlan::new();
+        plan.drop_dependents(&deps);
+        plan.add(
+            "ALTER TABLE",
+            format!(
                 "ALTER TABLE {qualified_table} DROP COLUMN {}",
                 pg_quote_ident(column_name)
-            )),
-        ));
-        step_num += 1;
-
-        // CREATE dependent views base-first (ascending level)
-        for dep in &deps {
-            let references_column = col_ref_views
-                .iter()
-                .any(|(s, v)| s == &dep.dep_schema && v == &dep.dep_view);
-
-            let create_sql = if references_column {
-                format!(
-                    "-- TODO: remove reference to '{}'\n{}",
-                    column_name, dep.view_def
-                )
+            ),
+        );
+        plan.create_dependents(&deps, |dep| {
+            if dep_references_column(&col_refs, dep) {
+                Some(format!("-- TODO: remove reference to '{column_name}'"))
             } else {
-                dep.view_def.clone()
-            };
-
-            steps.push((
-                step_num,
-                Some(if dep.view_kind == "m" {
-                    "CREATE MATERIALIZED VIEW".to_string()
-                } else {
-                    "CREATE VIEW".to_string()
-                }),
-                Some(create_sql),
-            ));
-            step_num += 1;
-        }
-
-        // GRANT privileges
-        for grant in &grants {
-            steps.push((
-                step_num,
-                Some("GRANT".to_string()),
-                Some(grant.clone()),
-            ));
-            step_num += 1;
-        }
-
-        // REFRESH materialized views
-        for dep in &deps {
-            if dep.view_kind == "m" {
-                let qualified = format!(
-                    "{}.{}",
-                    pg_quote_ident(&dep.dep_schema),
-                    pg_quote_ident(&dep.dep_view)
-                );
-                steps.push((
-                    step_num,
-                    Some("REFRESH MATERIALIZED VIEW".to_string()),
-                    Some(format!("REFRESH MATERIALIZED VIEW {qualified}")),
-                ));
-                step_num += 1;
+                None
             }
-        }
+        });
+        plan.restore_grants(&grants);
+        plan.refresh_matviews(None, &deps);
 
-        Ok::<_, spi::SpiError>(steps)
+        Ok::<_, spi::SpiError>(plan.into_table_iter())
     })
-    .unwrap();
-
-    TableIterator::new(steps)
+    .unwrap()
 }
+
