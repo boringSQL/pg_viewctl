@@ -422,3 +422,169 @@ pub fn generate_replace_view(
 
     TableIterator::new(steps)
 }
+
+#[pg_extern]
+pub fn generate_drop_column(
+    schema_name: &str,
+    table_name: &str,
+    column_name: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(operation, Option<String>),
+        name!(sql, Option<String>),
+    ),
+> {
+    let validate_sql = include_str!("../sql_queries/generate_drop_column_validate.sql");
+    let deps_sql = include_str!("../sql_queries/generate_drop_column_deps.sql");
+    let col_refs_sql = include_str!("../sql_queries/generate_drop_column_col_refs.sql");
+    let grants_sql = include_str!("../sql_queries/generate_drop_column_grants.sql");
+
+    let col_args = vec![
+        text_arg(schema_name),
+        text_arg(table_name),
+        text_arg(column_name),
+    ];
+
+    let steps = Spi::connect(|client| {
+        // 1. validate table+column exist on a base table
+        let validate_rows = client.select(validate_sql, Some(1), &col_args)?;
+        if validate_rows.len() == 0 {
+            pgrx::error!(
+                "table {schema_name}.{table_name} column {column_name} does not exist"
+            );
+        }
+
+        // 2. fetch column-level dependent views with definitions
+        let dep_rows = client.select(deps_sql, None, &col_args)?;
+        let mut deps: Vec<DepInfo> = Vec::new();
+        for row in dep_rows {
+            deps.push(DepInfo {
+                dep_schema: row.get_by_name::<String, _>("dep_schema")?.unwrap_or_default(),
+                dep_view: row.get_by_name::<String, _>("dep_view")?.unwrap_or_default(),
+                view_kind: row.get_by_name::<String, _>("view_kind")?.unwrap_or_default(),
+                view_def: row.get_by_name::<String, _>("view_def")?.unwrap_or_default(),
+            });
+        }
+
+        // 3. identify which views directly reference the dropped column
+        let col_ref_rows = client.select(col_refs_sql, None, &col_args)?;
+        let mut col_ref_views: Vec<(String, String)> = Vec::new();
+        for row in col_ref_rows {
+            col_ref_views.push((
+                row.get_by_name::<String, _>("dep_schema")?.unwrap_or_default(),
+                row.get_by_name::<String, _>("dep_view")?.unwrap_or_default(),
+            ));
+        }
+
+        // 4. fetch grants for affected views
+        let grant_rows = client.select(grants_sql, None, &col_args)?;
+        let mut grants: Vec<String> = Vec::new();
+        for row in grant_rows {
+            if let Some(sql) = row.get_by_name::<String, _>("grant_sql")? {
+                grants.push(sql);
+            }
+        }
+
+        // 5. generate steps
+        let mut steps: Vec<(i32, Option<String>, Option<String>)> = Vec::new();
+        let mut step_num: i32 = 1;
+
+        let qualified_table = format!(
+            "{}.{}",
+            pg_quote_ident(schema_name),
+            pg_quote_ident(table_name)
+        );
+
+        // DROP dependent views leaf-first (descending level)
+        for dep in deps.iter().rev() {
+            let qualified = format!(
+                "{}.{}",
+                pg_quote_ident(&dep.dep_schema),
+                pg_quote_ident(&dep.dep_view)
+            );
+            let drop_kind = if dep.view_kind == "m" {
+                "MATERIALIZED VIEW"
+            } else {
+                "VIEW"
+            };
+            steps.push((
+                step_num,
+                Some(format!("DROP {drop_kind}")),
+                Some(format!("DROP {drop_kind} IF EXISTS {qualified}")),
+            ));
+            step_num += 1;
+        }
+
+        // ALTER TABLE DROP COLUMN
+        steps.push((
+            step_num,
+            Some("ALTER TABLE".to_string()),
+            Some(format!(
+                "ALTER TABLE {qualified_table} DROP COLUMN {}",
+                pg_quote_ident(column_name)
+            )),
+        ));
+        step_num += 1;
+
+        // CREATE dependent views base-first (ascending level)
+        for dep in &deps {
+            let references_column = col_ref_views
+                .iter()
+                .any(|(s, v)| s == &dep.dep_schema && v == &dep.dep_view);
+
+            let create_sql = if references_column {
+                format!(
+                    "-- TODO: remove reference to '{}'\n{}",
+                    column_name, dep.view_def
+                )
+            } else {
+                dep.view_def.clone()
+            };
+
+            steps.push((
+                step_num,
+                Some(if dep.view_kind == "m" {
+                    "CREATE MATERIALIZED VIEW".to_string()
+                } else {
+                    "CREATE VIEW".to_string()
+                }),
+                Some(create_sql),
+            ));
+            step_num += 1;
+        }
+
+        // GRANT privileges
+        for grant in &grants {
+            steps.push((
+                step_num,
+                Some("GRANT".to_string()),
+                Some(grant.clone()),
+            ));
+            step_num += 1;
+        }
+
+        // REFRESH materialized views
+        for dep in &deps {
+            if dep.view_kind == "m" {
+                let qualified = format!(
+                    "{}.{}",
+                    pg_quote_ident(&dep.dep_schema),
+                    pg_quote_ident(&dep.dep_view)
+                );
+                steps.push((
+                    step_num,
+                    Some("REFRESH MATERIALIZED VIEW".to_string()),
+                    Some(format!("REFRESH MATERIALIZED VIEW {qualified}")),
+                ));
+                step_num += 1;
+            }
+        }
+
+        Ok::<_, spi::SpiError>(steps)
+    })
+    .unwrap();
+
+    TableIterator::new(steps)
+}
