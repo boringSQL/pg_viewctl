@@ -553,3 +553,210 @@ pub fn generate_drop_column(
     .unwrap()
 }
 
+#[pg_extern]
+pub fn generate_alter_type(
+    schema_name: &str,
+    table_name: &str,
+    column_name: &str,
+    new_type: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(operation, Option<String>),
+        name!(sql, Option<String>),
+    ),
+> {
+    let validate_sql = include_str!("../sql_queries/generate_alter_type_validate.sql");
+    let deps_sql = include_str!("../sql_queries/generate_alter_type_deps.sql");
+    let col_refs_sql = include_str!("../sql_queries/generate_alter_type_col_refs.sql");
+    let grants_sql = include_str!("../sql_queries/generate_alter_type_grants.sql");
+
+    let col_args = vec![
+        text_arg(schema_name),
+        text_arg(table_name),
+        text_arg(column_name),
+    ];
+
+    Spi::connect(|client| {
+        let validate_rows = client.select(validate_sql, Some(1), &col_args)?;
+        if validate_rows.len() == 0 {
+            pgrx::error!(
+                "table {schema_name}.{table_name} column {column_name} does not exist"
+            );
+        }
+        let current_type: String = validate_rows
+            .first()
+            .get_by_name::<String, _>("current_type")?
+            .unwrap_or_default();
+
+        let deps = fetch_deps(&client, deps_sql, &col_args)?;
+        let col_refs = fetch_col_refs(&client, col_refs_sql, &col_args)?;
+        let grants = fetch_grants(&client, grants_sql, &col_args)?;
+
+        let qualified_table = format!(
+            "{}.{}",
+            pg_quote_ident(schema_name),
+            pg_quote_ident(table_name)
+        );
+
+        let mut plan = MigrationPlan::new();
+        plan.drop_dependents(&deps);
+        plan.add(
+            "ALTER TABLE",
+            format!(
+                "ALTER TABLE {qualified_table} ALTER COLUMN {} TYPE {new_type}",
+                pg_quote_ident(column_name)
+            ),
+        );
+        plan.create_dependents(&deps, |dep| {
+            if dep_references_column(&col_refs, dep) {
+                Some(format!(
+                    "-- TODO: verify type change of '{column_name}' from '{current_type}' to '{new_type}'"
+                ))
+            } else {
+                None
+            }
+        });
+        plan.restore_grants(&grants);
+        plan.refresh_matviews(None, &deps);
+
+        Ok::<_, spi::SpiError>(plan.into_table_iter())
+    })
+    .unwrap()
+}
+
+#[pg_extern]
+pub fn generate_rename_view_column(
+    schema_name: &str,
+    view_name: &str,
+    old_column: &str,
+    new_column: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(step, i32),
+        name!(operation, Option<String>),
+        name!(sql, Option<String>),
+    ),
+> {
+    let validate_sql = include_str!("../sql_queries/generate_rename_view_column_validate.sql");
+    let deps_sql = include_str!("../sql_queries/generate_rename_view_column_deps.sql");
+    let col_refs_sql = include_str!("../sql_queries/generate_rename_view_column_col_refs.sql");
+    let grants_sql = include_str!("../sql_queries/generate_rename_view_column_grants.sql");
+    let attlist_sql = include_str!("../sql_queries/generate_rename_view_column_attlist.sql");
+
+    if old_column == new_column {
+        pgrx::error!("old and new column names are the same");
+    }
+
+    let view_args = vec![text_arg(schema_name), text_arg(view_name)];
+    let col_args = vec![
+        text_arg(schema_name),
+        text_arg(view_name),
+        text_arg(old_column),
+    ];
+
+    Spi::connect(|client| {
+        let validate_rows = client.select(validate_sql, Some(1), &col_args)?;
+        if validate_rows.len() == 0 {
+            pgrx::error!(
+                "view {schema_name}.{view_name} column {old_column} does not exist"
+            );
+        }
+        let target_kind: String = validate_rows
+            .first()
+            .get_by_name::<String, _>("view_kind")?
+            .unwrap_or_default();
+
+        let deps = fetch_deps(&client, deps_sql, &view_args)?;
+        let col_refs = fetch_col_refs(&client, col_refs_sql, &col_args)?;
+        let grants = fetch_grants(&client, grants_sql, &view_args)?;
+
+        // fetch column list for target view
+        let att_rows = client.select(attlist_sql, None, &view_args)?;
+        let mut columns: Vec<String> = Vec::new();
+        for row in att_rows {
+            columns.push(
+                row.get_by_name::<String, _>("col_name")?.unwrap_or_default(),
+            );
+        }
+
+        // get target view definition and extract SELECT body
+        let def_query = format!(
+            "SELECT pgvc_get_view_definition({}, {}) AS view_def",
+            pg_quote_literal(schema_name),
+            pg_quote_literal(view_name),
+        );
+        let def_row = client.select(&def_query, Some(1), &[])?;
+        let view_def: String = def_row
+            .first()
+            .get_by_name::<String, _>("view_def")?
+            .unwrap_or_default();
+
+        let select_body = view_def
+            .find(" AS\n")
+            .map(|pos| &view_def[pos + 4..])
+            .unwrap_or(&view_def);
+
+        let qualified_target = format!(
+            "{}.{}",
+            pg_quote_ident(schema_name),
+            pg_quote_ident(view_name)
+        );
+        let target_kind_label = if target_kind == "m" {
+            "MATERIALIZED VIEW"
+        } else {
+            "VIEW"
+        };
+
+        let renamed_columns: Vec<String> = columns
+            .iter()
+            .map(|c| {
+                if c.contains(old_column) {
+                    pg_quote_ident(new_column)
+                } else {
+                    pg_quote_ident(c)
+                }
+            })
+            .collect();
+        let column_list = renamed_columns.join(", ");
+
+        let mut plan = MigrationPlan::new();
+        plan.drop_dependents(&deps);
+        plan.add(
+            &format!("DROP {target_kind_label}"),
+            format!("DROP {target_kind_label} IF EXISTS {qualified_target}"),
+        );
+        plan.add(
+            &format!("CREATE {target_kind_label}"),
+            format!(
+                "CREATE {target_kind_label} {qualified_target} ({column_list}) AS\n{select_body}"
+            ),
+        );
+        plan.create_dependents(&deps, |dep| {
+            if dep_references_column(&col_refs, dep) {
+                Some(format!(
+                    "-- TODO: update reference from '{old_column}' to '{new_column}'"
+                ))
+            } else {
+                None
+            }
+        });
+        plan.restore_grants(&grants);
+
+        let target_refresh = if target_kind == "m" {
+            Some(qualified_target.as_str())
+        } else {
+            None
+        };
+        plan.refresh_matviews(target_refresh, &deps);
+
+        Ok::<_, spi::SpiError>(plan.into_table_iter())
+    })
+    .unwrap()
+}
+
+fn pg_quote_literal(val: &str) -> String {
+    format!("'{}'", val.replace('\'', "''"))
+}
