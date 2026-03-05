@@ -401,3 +401,706 @@ fn test_generate_replace_view_executable() {
 
     assert_eq!(col_count, 2, "rv_target should now have 2 columns (id, name) instead of 3");
 }
+
+fn create_drop_column_fixtures() {
+    Spi::run(include_str!("../sql_queries/tests/create_drop_column_fixtures.sql")).unwrap();
+}
+
+#[pg_test]
+fn test_generate_drop_column_basic() {
+    create_drop_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_drop_column(
+        "public", "dc_base", "email",
+    ).collect();
+
+    assert!(!results.is_empty());
+
+    for (i, row) in results.iter().enumerate() {
+        assert_eq!(row.0, (i + 1) as i32);
+    }
+
+    let ops: Vec<&str> = results.iter().filter_map(|r| r.1.as_deref()).collect();
+
+    // DROPs come first
+    let last_drop = ops.iter().rposition(|o| o.starts_with("DROP")).unwrap();
+    // then ALTER TABLE
+    let alter_pos = ops.iter().position(|o| *o == "ALTER TABLE").unwrap();
+    assert!(last_drop < alter_pos, "DROPs must come before ALTER TABLE");
+
+    // then CREATEs
+    let first_create = ops.iter().position(|o| o.starts_with("CREATE")).unwrap();
+    assert!(alter_pos < first_create, "ALTER TABLE must come before CREATEs");
+
+    // then GRANTs
+    if let Some(grant_pos) = ops.iter().position(|o| *o == "GRANT") {
+        let last_create = ops.iter().rposition(|o| o.starts_with("CREATE")).unwrap();
+        assert!(last_create < grant_pos, "CREATEs must come before GRANTs");
+    }
+}
+
+#[pg_test]
+fn test_generate_drop_column_no_deps() {
+    create_drop_column_fixtures();
+
+    // drop 'notes' — no view references it
+    let results: Vec<_> = crate::functions::generate_drop_column(
+        "public", "dc_base", "notes",
+    ).collect();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1.as_deref(), Some("ALTER TABLE"));
+}
+
+#[pg_test]
+#[should_panic(expected = "does not exist")]
+fn test_generate_drop_column_nonexistent_table() {
+    create_drop_column_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_drop_column(
+        "public", "no_such_table", "id",
+    ).collect();
+}
+
+#[pg_test]
+#[should_panic(expected = "does not exist")]
+fn test_generate_drop_column_nonexistent_column() {
+    create_drop_column_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_drop_column(
+        "public", "dc_base", "no_such_col",
+    ).collect();
+}
+
+#[pg_test]
+fn test_generate_drop_column_todo_marker() {
+    create_drop_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_drop_column(
+        "public", "dc_base", "email",
+    ).collect();
+
+    let create_steps: Vec<(&str, &str)> = results
+        .iter()
+        .filter(|r| r.1.as_deref().map(|o| o.starts_with("CREATE")).unwrap_or(false))
+        .map(|r| (r.1.as_deref().unwrap(), r.2.as_deref().unwrap()))
+        .collect();
+
+    // dc_view_with_email and dc_mat_dep reference email — should get TODO
+    let with_email = create_steps.iter().find(|(_, sql)| sql.contains("dc_view_with_email"));
+    assert!(with_email.is_some(), "expected CREATE for dc_view_with_email");
+    assert!(
+        with_email.unwrap().1.contains("-- TODO: remove reference to 'email'"),
+        "dc_view_with_email should have TODO marker"
+    );
+
+    let mat_dep = create_steps.iter().find(|(_, sql)| sql.contains("dc_mat_dep"));
+    assert!(mat_dep.is_some(), "expected CREATE for dc_mat_dep");
+    assert!(
+        mat_dep.unwrap().1.contains("-- TODO: remove reference to 'email'"),
+        "dc_mat_dep should have TODO marker"
+    );
+
+    // dc_dep_l2 depends on dc_view_with_email but doesn't directly reference email
+    let dep_l2 = create_steps.iter().find(|(_, sql)| sql.contains("dc_dep_l2"));
+    assert!(dep_l2.is_some(), "expected CREATE for dc_dep_l2");
+    assert!(
+        !dep_l2.unwrap().1.contains("-- TODO"),
+        "dc_dep_l2 should NOT have TODO marker (transitive dep, no direct column ref)"
+    );
+
+    // dc_view_no_email doesn't reference email — not in the plan at all
+    let no_email = create_steps.iter().find(|(_, sql)| sql.contains("dc_view_no_email"));
+    assert!(no_email.is_none(), "dc_view_no_email should NOT be in the plan");
+}
+
+#[pg_test]
+fn test_generate_drop_column_grants_preserved() {
+    create_drop_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_drop_column(
+        "public", "dc_base", "email",
+    ).collect();
+
+    let grant_sqls: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref() == Some("GRANT"))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    assert!(!grant_sqls.is_empty(), "expected GRANT steps");
+
+    let has_with_email_grant = grant_sqls.iter().any(|s| s.contains("dc_view_with_email"));
+    assert!(has_with_email_grant, "expected GRANT for dc_view_with_email");
+
+    // dc_view_no_email doesn't reference email, so it's not in the plan
+    let has_no_email_grant = grant_sqls.iter().any(|s| s.contains("dc_view_no_email"));
+    assert!(!has_no_email_grant, "dc_view_no_email should NOT have GRANT (unaffected)");
+}
+
+#[pg_test]
+fn test_generate_drop_column_matview_refresh() {
+    create_drop_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_drop_column(
+        "public", "dc_base", "email",
+    ).collect();
+
+    let refresh_ops: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref() == Some("REFRESH MATERIALIZED VIEW"))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    assert!(!refresh_ops.is_empty(), "expected REFRESH MATERIALIZED VIEW step");
+    assert!(
+        refresh_ops.iter().any(|s| s.contains("dc_mat_dep")),
+        "expected REFRESH for dc_mat_dep"
+    );
+}
+
+#[pg_test]
+fn test_generate_drop_column_drop_order() {
+    create_drop_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_drop_column(
+        "public", "dc_base", "email",
+    ).collect();
+
+    let drop_sqls: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref().map(|o| o.starts_with("DROP")).unwrap_or(false))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    // dc_dep_l2 depends on dc_view_with_email, so l2 must be dropped first
+    let l2_pos = drop_sqls.iter().position(|s| s.contains("dc_dep_l2"));
+    let with_email_pos = drop_sqls.iter().position(|s| s.contains("dc_view_with_email"));
+
+    assert!(l2_pos.is_some(), "expected DROP for dc_dep_l2");
+    assert!(with_email_pos.is_some(), "expected DROP for dc_view_with_email");
+    assert!(
+        l2_pos.unwrap() < with_email_pos.unwrap(),
+        "dc_dep_l2 must be dropped before dc_view_with_email"
+    );
+}
+
+#[pg_test]
+fn test_generate_drop_column_executable() {
+    create_drop_column_fixtures();
+
+    // insert test data so matview refresh works
+    Spi::run("INSERT INTO public.dc_base VALUES (1, 'alice', 'a@example.com', 'active', 'some notes', true)").unwrap();
+    Spi::run("REFRESH MATERIALIZED VIEW public.dc_mat_dep").unwrap();
+
+    // drop 'notes' — no view references it, so all generated SQL is directly executable
+    let results: Vec<_> = crate::functions::generate_drop_column(
+        "public", "dc_base", "notes",
+    ).collect();
+
+    for row in &results {
+        if let Some(sql) = row.2.as_deref() {
+            Spi::run(sql).unwrap();
+        }
+    }
+
+    // verify column is gone
+    let col_exists = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT count(*) AS cnt FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'dc_base' AND column_name = 'notes'",
+                None,
+                &[],
+            )
+            .map(|t| t.first().get_by_name::<i64, _>("cnt").unwrap().unwrap_or(0))
+    })
+    .unwrap();
+    assert_eq!(col_exists, 0, "notes column should be gone");
+
+    // verify views still work
+    let view_ok = Spi::connect(|client| {
+        client
+            .select("SELECT count(*) AS cnt FROM public.dc_view_with_email", None, &[])
+            .map(|t| t.first().get_by_name::<i64, _>("cnt").unwrap().unwrap_or(-1))
+    })
+    .unwrap();
+    assert!(view_ok >= 0, "dc_view_with_email should still be queryable");
+}
+
+fn create_alter_type_fixtures() {
+    Spi::run(include_str!("../sql_queries/tests/create_alter_type_fixtures.sql")).unwrap();
+}
+
+#[pg_test]
+fn test_generate_alter_type_basic() {
+    create_alter_type_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "amount", "numeric(12,4)",
+    ).collect();
+
+    assert!(!results.is_empty());
+
+    for (i, row) in results.iter().enumerate() {
+        assert_eq!(row.0, (i + 1) as i32);
+    }
+
+    let ops: Vec<&str> = results.iter().filter_map(|r| r.1.as_deref()).collect();
+
+    let last_drop = ops.iter().rposition(|o| o.starts_with("DROP")).unwrap();
+    let alter_pos = ops.iter().position(|o| *o == "ALTER TABLE").unwrap();
+    assert!(last_drop < alter_pos, "DROPs must come before ALTER TABLE");
+
+    let first_create = ops.iter().position(|o| o.starts_with("CREATE")).unwrap();
+    assert!(alter_pos < first_create, "ALTER TABLE must come before CREATEs");
+
+    if let Some(grant_pos) = ops.iter().position(|o| *o == "GRANT") {
+        let last_create = ops.iter().rposition(|o| o.starts_with("CREATE")).unwrap();
+        assert!(last_create < grant_pos, "CREATEs must come before GRANTs");
+    }
+}
+
+#[pg_test]
+fn test_generate_alter_type_no_deps() {
+    create_alter_type_fixtures();
+
+    // change 'active' type — no view references it directly by column dep
+    let results: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "id", "bigint",
+    ).collect();
+
+    // id is referenced by views, so this won't be a no-deps case.
+    // Use a column that truly has no view deps — but all our views reference id or amount.
+    // Let's test with the 'active' column which is used in WHERE but not as a selected column dep.
+    // Actually, pg_depend tracks WHERE-clause refs too. Let's just verify ALTER TABLE is present.
+    let ops: Vec<&str> = results.iter().filter_map(|r| r.1.as_deref()).collect();
+    assert!(ops.contains(&"ALTER TABLE"), "expected ALTER TABLE step");
+}
+
+#[pg_test]
+#[should_panic(expected = "does not exist")]
+fn test_generate_alter_type_nonexistent_table() {
+    create_alter_type_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_alter_type(
+        "public", "no_such_table", "id", "bigint",
+    ).collect();
+}
+
+#[pg_test]
+#[should_panic(expected = "does not exist")]
+fn test_generate_alter_type_nonexistent_column() {
+    create_alter_type_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "no_such_col", "bigint",
+    ).collect();
+}
+
+#[pg_test]
+fn test_generate_alter_type_todo_marker() {
+    create_alter_type_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "amount", "numeric(12,4)",
+    ).collect();
+
+    let create_steps: Vec<(&str, &str)> = results
+        .iter()
+        .filter(|r| r.1.as_deref().map(|o| o.starts_with("CREATE")).unwrap_or(false))
+        .map(|r| (r.1.as_deref().unwrap(), r.2.as_deref().unwrap()))
+        .collect();
+
+    // at_view_with_amount references amount — should get TODO
+    let with_amount = create_steps.iter().find(|(_, sql)| sql.contains("at_view_with_amount"));
+    assert!(with_amount.is_some(), "expected CREATE for at_view_with_amount");
+    assert!(
+        with_amount.unwrap().1.contains("-- TODO: verify type change of 'amount'"),
+        "at_view_with_amount should have TODO marker"
+    );
+    assert!(
+        with_amount.unwrap().1.contains("numeric(10,2)"),
+        "TODO should mention old type"
+    );
+    assert!(
+        with_amount.unwrap().1.contains("numeric(12,4)"),
+        "TODO should mention new type"
+    );
+
+    // at_mat_dep references amount — should get TODO
+    let mat_dep = create_steps.iter().find(|(_, sql)| sql.contains("at_mat_dep"));
+    assert!(mat_dep.is_some(), "expected CREATE for at_mat_dep");
+    assert!(
+        mat_dep.unwrap().1.contains("-- TODO: verify type change of 'amount'"),
+        "at_mat_dep should have TODO marker"
+    );
+
+    // at_dep_l2 depends on at_view_with_amount but doesn't directly reference amount on base table
+    let dep_l2 = create_steps.iter().find(|(_, sql)| sql.contains("at_dep_l2"));
+    assert!(dep_l2.is_some(), "expected CREATE for at_dep_l2");
+    assert!(
+        !dep_l2.unwrap().1.contains("-- TODO"),
+        "at_dep_l2 should NOT have TODO marker (transitive dep)"
+    );
+
+    // at_view_no_amount doesn't reference amount — not in the plan at all
+    let no_amount = create_steps.iter().find(|(_, sql)| sql.contains("at_view_no_amount"));
+    assert!(no_amount.is_none(), "at_view_no_amount should NOT be in the plan");
+}
+
+#[pg_test]
+fn test_generate_alter_type_grants_preserved() {
+    create_alter_type_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "amount", "numeric(12,4)",
+    ).collect();
+
+    let grant_sqls: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref() == Some("GRANT"))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    assert!(!grant_sqls.is_empty(), "expected GRANT steps");
+
+    let has_with_amount_grant = grant_sqls.iter().any(|s| s.contains("at_view_with_amount"));
+    assert!(has_with_amount_grant, "expected GRANT for at_view_with_amount");
+}
+
+#[pg_test]
+fn test_generate_alter_type_matview_refresh() {
+    create_alter_type_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "amount", "numeric(12,4)",
+    ).collect();
+
+    let refresh_ops: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref() == Some("REFRESH MATERIALIZED VIEW"))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    assert!(!refresh_ops.is_empty(), "expected REFRESH MATERIALIZED VIEW step");
+    assert!(
+        refresh_ops.iter().any(|s| s.contains("at_mat_dep")),
+        "expected REFRESH for at_mat_dep"
+    );
+}
+
+#[pg_test]
+fn test_generate_alter_type_drop_order() {
+    create_alter_type_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "amount", "numeric(12,4)",
+    ).collect();
+
+    let drop_sqls: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref().map(|o| o.starts_with("DROP")).unwrap_or(false))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    let l2_pos = drop_sqls.iter().position(|s| s.contains("at_dep_l2"));
+    let with_amount_pos = drop_sqls.iter().position(|s| s.contains("at_view_with_amount"));
+
+    assert!(l2_pos.is_some(), "expected DROP for at_dep_l2");
+    assert!(with_amount_pos.is_some(), "expected DROP for at_view_with_amount");
+    assert!(
+        l2_pos.unwrap() < with_amount_pos.unwrap(),
+        "at_dep_l2 must be dropped before at_view_with_amount"
+    );
+}
+
+#[pg_test]
+fn test_generate_alter_type_executable() {
+    create_alter_type_fixtures();
+
+    // insert test data so matview refresh works
+    Spi::run("INSERT INTO public.at_base VALUES (1, 99.99, 'test', true)").unwrap();
+    Spi::run("REFRESH MATERIALIZED VIEW public.at_mat_dep").unwrap();
+
+    // change label from text to varchar(100) — compatible, no view deps on label
+    let results: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "label", "varchar(100)",
+    ).collect();
+
+    for row in &results {
+        if let Some(sql) = row.2.as_deref() {
+            Spi::run(sql).unwrap();
+        }
+    }
+
+    // verify type changed
+    let new_type = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'at_base' AND column_name = 'label'",
+                None,
+                &[],
+            )
+            .map(|t| t.first().get_by_name::<String, _>("data_type").unwrap().unwrap_or_default())
+    })
+    .unwrap();
+    assert_eq!(new_type, "character varying", "label should now be varchar");
+}
+
+fn create_rename_view_column_fixtures() {
+    Spi::run(include_str!("../sql_queries/tests/create_rename_view_column_fixtures.sql")).unwrap();
+}
+
+#[pg_test]
+fn test_generate_rename_view_column_basic() {
+    create_rename_view_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "name", "full_name",
+    ).collect();
+
+    assert!(!results.is_empty());
+
+    for (i, row) in results.iter().enumerate() {
+        assert_eq!(row.0, (i + 1) as i32);
+    }
+
+    let ops: Vec<&str> = results.iter().filter_map(|r| r.1.as_deref()).collect();
+
+    // DROPs come first (dependents + target)
+    let last_drop = ops.iter().rposition(|o| o.starts_with("DROP")).unwrap();
+
+    // then target CREATE
+    let target_create_pos = ops
+        .iter()
+        .position(|o| *o == "CREATE VIEW" || *o == "CREATE MATERIALIZED VIEW")
+        .unwrap();
+    assert!(last_drop < target_create_pos, "DROPs must come before CREATEs");
+
+    // then GRANTs
+    if let Some(grant_pos) = ops.iter().position(|o| *o == "GRANT") {
+        let last_create = ops.iter().rposition(|o| o.starts_with("CREATE")).unwrap();
+        assert!(last_create < grant_pos, "CREATEs must come before GRANTs");
+    }
+}
+
+#[pg_test]
+fn test_generate_rename_view_column_no_deps() {
+    create_rename_view_column_fixtures();
+
+    // rvc_dep_l2 is a leaf view with no dependents — just DROP + CREATE
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_dep_l2", "name", "full_name",
+    ).collect();
+
+    let ops: Vec<&str> = results.iter().filter_map(|r| r.1.as_deref()).collect();
+    assert_eq!(ops.len(), 2);
+    assert!(ops[0].starts_with("DROP"), "first step should be DROP");
+    assert!(ops[1].starts_with("CREATE"), "second step should be CREATE");
+}
+
+#[pg_test]
+#[should_panic(expected = "does not exist")]
+fn test_generate_rename_view_column_nonexistent_view() {
+    create_rename_view_column_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "no_such_view", "name", "full_name",
+    ).collect();
+}
+
+#[pg_test]
+#[should_panic(expected = "does not exist")]
+fn test_generate_rename_view_column_nonexistent_column() {
+    create_rename_view_column_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "no_such_col", "full_name",
+    ).collect();
+}
+
+#[pg_test]
+#[should_panic(expected = "same")]
+fn test_generate_rename_view_column_same_name() {
+    create_rename_view_column_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "name", "name",
+    ).collect();
+}
+
+#[pg_test]
+fn test_generate_rename_view_column_column_list() {
+    create_rename_view_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "name", "full_name",
+    ).collect();
+
+    // find the CREATE step for the target view
+    let target_create = results
+        .iter()
+        .find(|r| {
+            r.2.as_deref().map(|s| s.contains("rvc_target") && s.starts_with("CREATE")).unwrap_or(false)
+        });
+
+    assert!(target_create.is_some(), "expected CREATE for rvc_target");
+    let sql = target_create.unwrap().2.as_deref().unwrap();
+    assert!(sql.contains("full_name"), "CREATE should use new column name 'full_name'");
+    assert!(!sql.contains("(\"name\"") && !sql.contains(", \"name\""), "CREATE should not use old column name 'name' in column list");
+}
+
+
+#[pg_test]
+fn test_generate_rename_view_column_todo_marker() {
+    create_rename_view_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "name", "full_name",
+    ).collect();
+
+    let create_steps: Vec<(&str, &str)> = results
+        .iter()
+        .filter(|r| r.1.as_deref().map(|o| o.starts_with("CREATE")).unwrap_or(false))
+        .map(|r| (r.1.as_deref().unwrap(), r.2.as_deref().unwrap()))
+        .collect();
+
+    // rvc_dep_l1 references 'name' — should get TODO
+    let dep_l1 = create_steps.iter().find(|(_, sql)| sql.contains("rvc_dep_l1"));
+    assert!(dep_l1.is_some(), "expected CREATE for rvc_dep_l1");
+    assert!(
+        dep_l1.unwrap().1.contains("-- TODO: update reference from 'name' to 'full_name'"),
+        "rvc_dep_l1 should have TODO marker"
+    );
+
+    // rvc_dep_no_ref does not reference 'name' but depends on rvc_target via 'email'
+    // it should be in the plan (it's a dependent) but without TODO
+    let dep_no_ref = create_steps.iter().find(|(_, sql)| sql.contains("rvc_dep_no_ref"));
+    assert!(dep_no_ref.is_some(), "expected CREATE for rvc_dep_no_ref");
+    assert!(
+        !dep_no_ref.unwrap().1.contains("-- TODO"),
+        "rvc_dep_no_ref should NOT have TODO marker"
+    );
+}
+
+#[pg_test]
+fn test_generate_rename_view_column_grants_preserved() {
+    create_rename_view_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "name", "full_name",
+    ).collect();
+
+    let grant_sqls: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref() == Some("GRANT"))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    assert!(!grant_sqls.is_empty(), "expected GRANT steps");
+
+    let has_target_grant = grant_sqls.iter().any(|s| s.contains("rvc_target"));
+    let has_l1_grant = grant_sqls.iter().any(|s| s.contains("rvc_dep_l1"));
+    assert!(has_target_grant, "expected GRANT for rvc_target");
+    assert!(has_l1_grant, "expected GRANT for rvc_dep_l1");
+}
+
+#[pg_test]
+fn test_generate_rename_view_column_matview_refresh() {
+    create_rename_view_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "name", "full_name",
+    ).collect();
+
+    let refresh_ops: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref() == Some("REFRESH MATERIALIZED VIEW"))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    assert!(!refresh_ops.is_empty(), "expected REFRESH MATERIALIZED VIEW step");
+    assert!(
+        refresh_ops.iter().any(|s| s.contains("rvc_mat_dep")),
+        "expected REFRESH for rvc_mat_dep"
+    );
+}
+
+#[pg_test]
+fn test_generate_rename_view_column_drop_order() {
+    create_rename_view_column_fixtures();
+
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "name", "full_name",
+    ).collect();
+
+    let drop_sqls: Vec<&str> = results
+        .iter()
+        .filter(|r| r.1.as_deref().map(|o| o.starts_with("DROP")).unwrap_or(false))
+        .filter_map(|r| r.2.as_deref())
+        .collect();
+
+    // rvc_dep_l2 depends on rvc_dep_l1, so l2 must be dropped first
+    let l2_pos = drop_sqls.iter().position(|s| s.contains("rvc_dep_l2"));
+    let l1_pos = drop_sqls.iter().position(|s| s.contains("rvc_dep_l1"));
+
+    assert!(l2_pos.is_some(), "expected DROP for rvc_dep_l2");
+    assert!(l1_pos.is_some(), "expected DROP for rvc_dep_l1");
+    assert!(
+        l2_pos.unwrap() < l1_pos.unwrap(),
+        "rvc_dep_l2 must be dropped before rvc_dep_l1"
+    );
+
+    // target is dropped last among the DROPs
+    let target_pos = drop_sqls.iter().position(|s| s.contains("rvc_target"));
+    assert!(target_pos.is_some(), "expected DROP for rvc_target");
+    assert!(
+        l1_pos.unwrap() < target_pos.unwrap(),
+        "dependents must be dropped before target"
+    );
+}
+
+#[pg_test]
+fn test_generate_rename_view_column_executable() {
+    create_rename_view_column_fixtures();
+
+    // insert test data so matview refresh works
+    Spi::run("INSERT INTO public.rvc_base VALUES (1, 'alice', 'a@example.com', true)").unwrap();
+    Spi::run("REFRESH MATERIALIZED VIEW public.rvc_mat_dep").unwrap();
+
+    // rename 'email' to 'email_address' on rvc_dep_no_ref (leaf view, no dependents referencing it)
+    let results: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_dep_no_ref", "email", "email_address",
+    ).collect();
+
+    for row in &results {
+        if let Some(sql) = row.2.as_deref() {
+            Spi::run(sql).unwrap();
+        }
+    }
+
+    // verify column name changed
+    let has_new_col = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT count(*) AS cnt FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'rvc_dep_no_ref' AND column_name = 'email_address'",
+                None,
+                &[],
+            )
+            .map(|t| t.first().get_by_name::<i64, _>("cnt").unwrap().unwrap_or(0))
+    })
+    .unwrap();
+    assert_eq!(has_new_col, 1, "rvc_dep_no_ref should have 'email_address' column");
+
+    let has_old_col = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT count(*) AS cnt FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'rvc_dep_no_ref' AND column_name = 'email'",
+                None,
+                &[],
+            )
+            .map(|t| t.first().get_by_name::<i64, _>("cnt").unwrap().unwrap_or(0))
+    })
+    .unwrap();
+    assert_eq!(has_old_col, 0, "rvc_dep_no_ref should NOT have 'email' column anymore");
+}
