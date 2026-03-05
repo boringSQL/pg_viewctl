@@ -205,3 +205,18 @@ RETURNS TABLE(step int, operation text, sql text) AS $$
     SELECT step, operation, sql FROM generate_replace_view(p_schema, p_view, p_new_definition);
 $$ LANGUAGE sql STABLE STRICT;
 
+CREATE FUNCTION pgvc_generate_drop_column(p_schema text, p_table text, p_column text)
+RETURNS TABLE(step int, operation text, sql text) AS $$
+    SELECT step, operation, sql FROM generate_drop_column(p_schema, p_table, p_column);
+$$ LANGUAGE sql STABLE STRICT;
+
+CREATE FUNCTION pgvc_generate_alter_type(p_schema text, p_table text, p_column text, p_new_type text)
+RETURNS TABLE(step int, operation text, sql text) AS $$
+    SELECT step, operation, sql FROM generate_alter_type(p_schema, p_table, p_column, p_new_type);
+$$ LANGUAGE sql STABLE STRICT;
+
+CREATE FUNCTION pgvc_generate_rename_view_column(p_schema text, p_view text, p_old_column text, p_new_column text)
+RETURNS TABLE(step int, operation text, sql text) AS $$
+    SELECT step, operation, sql FROM generate_rename_view_column(p_schema, p_view, p_old_column, p_new_column);
+$$ LANGUAGE sql STABLE STRICT;
+
