@@ -1,3 +1,7 @@
+mod commands;
+mod connection;
+mod parse;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -61,5 +65,33 @@ pub enum OutputFormat {
 }
 
 fn main() {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+
+    match &cli.command {
+        Command::Plan { operation } => {
+            let target = plan_target(operation);
+            let mut client = connection::connect(cli.dsn.as_deref());
+            commands::plan::run(&mut client, &target);
+        }
+        Command::Generate { .. } => {
+            eprintln!("generate is not implemented yet");
+        }
+    }
+}
+
+fn plan_target(operation: &Operation) -> parse::SchemaObject {
+    let target_str = match operation {
+        Operation::DropColumn { target } => target,
+        Operation::ReplaceView { target, .. } => target,
+        Operation::AlterType { target, .. } => target,
+        Operation::RenameViewColumn { target, .. } => target,
+    };
+    let parts: Vec<&str> = target_str.split('.').collect();
+    if parts.len() < 2 {
+        panic!("target must have at least schema.object, got '{target_str}'");
+    }
+    parse::SchemaObject {
+        schema: parts[0].to_string(),
+        object: parts[1].to_string(),
+    }
 }
