@@ -19,12 +19,16 @@ pub fn connect(dsn: Option<&str>) -> Client {
     };
 
     let row = client.query_opt(
-        "SELECT 1 FROM pg_extension WHERE extname = 'pg_viewctl'",
+        "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_viewctl'",
         &[],
     ).unwrap();
 
-    if row.is_none() {
-        panic!("pg_viewctl extension is not installed in the database");
+    match row {
+        Some(row) => {
+            let schema: String = row.get(0);
+            client.execute(&format!("SET search_path TO {}, public", schema), &[]).unwrap();
+        }
+        None => panic!("pg_viewctl extension is not installed in the database"),
     }
 
     client
