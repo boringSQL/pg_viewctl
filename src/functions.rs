@@ -15,7 +15,20 @@ fn optional_date_arg(val: Option<Date>) -> DatumWithOid<'static> {
 }
 
 fn pg_quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+    let name = name.to_string();
+    unsafe {
+        let cname = std::ffi::CString::new(name.clone()).unwrap();
+        let quoted = pgrx::pg_sys::quote_identifier(cname.as_ptr());
+        let result = std::ffi::CStr::from_ptr(quoted)
+            .to_string_lossy()
+            .to_string();
+
+        // free memory
+        if quoted != cname.as_ptr() {
+            pgrx::pg_sys::pfree(quoted as *mut std::ffi::c_void);
+        }
+        return result;
+    }
 }
 
 struct DepInfo {
