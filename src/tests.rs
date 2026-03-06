@@ -1130,3 +1130,23 @@ fn test_generate_rename_view_column_executable() {
     .unwrap();
     assert_eq!(has_old_col, 0, "rvc_dep_no_ref should NOT have 'email' column anymore");
 }
+
+#[pg_test]
+#[should_panic(expected = "semicolon")]
+fn test_generate_alter_type_semicolon_rejected() {
+    create_alter_type_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_alter_type(
+        "public", "at_base", "amount", "int; DROP TABLE foo; --",
+    ).collect();
+}
+
+#[pg_test]
+#[should_panic(expected = "already has a column")]
+fn test_generate_rename_view_column_duplicate_column() {
+    create_rename_view_column_fixtures();
+
+    let _: Vec<_> = crate::functions::generate_rename_view_column(
+        "public", "rvc_target", "name", "id",
+    ).collect();
+}

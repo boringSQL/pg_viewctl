@@ -578,6 +578,10 @@ pub fn generate_alter_type(
         text_arg(column_name),
     ];
 
+    if new_type.contains(';') {
+        pgrx::error!("new_type must not contain semicolons");
+    }
+
     Spi::connect(|client| {
         let validate_rows = client.select(validate_sql, Some(1), &col_args)?;
         if validate_rows.len() == 0 {
@@ -682,17 +686,24 @@ pub fn generate_rename_view_column(
             );
         }
 
+        if columns.iter().any(|c| c != old_column && c == new_column) {
+            pgrx::error!(
+                "view {schema_name}.{view_name} already has a column named '{new_column}'"
+            );
+        }
+
         // get target view definition and extract SELECT body
-        let def_query = format!(
-            "SELECT pgvc_get_view_definition({}, {}) AS view_def",
-            pg_quote_literal(schema_name),
-            pg_quote_literal(view_name),
-        );
-        let def_row = client.select(&def_query, Some(1), &[])?;
+        let def_row = client.select(
+            "SELECT pgvc_get_view_definition($1, $2) AS view_def",
+            Some(1),
+            &view_args,
+        )?;
         let view_def: String = def_row
             .first()
             .get_by_name::<String, _>("view_def")?
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                pgrx::error!("could not retrieve definition for view {schema_name}.{view_name}");
+            });
 
         let select_body = view_def
             .find(" AS\n")
@@ -757,6 +768,3 @@ pub fn generate_rename_view_column(
     .unwrap()
 }
 
-fn pg_quote_literal(val: &str) -> String {
-    format!("'{}'", val.replace('\'', "''"))
-}
