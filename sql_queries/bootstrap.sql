@@ -1,9 +1,4 @@
-\echo Use "CREATE EXTENSION pg_viewctl" to load this file. \quit
-
--- pg_viewctl extension
--- Version 0.1.0
-
--- dprecation tracking table
+-- Deprecation tracking table
 CREATE TABLE IF NOT EXISTS pgvc_deprecated_columns (
     schema_name name NOT NULL,
     view_name name NOT NULL,
@@ -14,7 +9,7 @@ CREATE TABLE IF NOT EXISTS pgvc_deprecated_columns (
     PRIMARY KEY (schema_name, view_name, column_name)
 );
 
-CREATE FUNCTION pgvc_map_deptype(deptype "char") RETURNS text AS $$
+CREATE OR REPLACE FUNCTION pgvc_map_deptype(deptype "char") RETURNS text AS $$
 SELECT CASE deptype
     WHEN 'n' THEN 'NORMAL'
     WHEN 'a' THEN 'AUTO'
@@ -25,7 +20,7 @@ SELECT CASE deptype
 END;
 $$ LANGUAGE sql IMMUTABLE STRICT;
 
-CREATE FUNCTION pgvc_map_impact(deptype "char") RETURNS text AS $$
+CREATE OR REPLACE FUNCTION pgvc_map_impact(deptype "char") RETURNS text AS $$
 SELECT CASE deptype
     WHEN 'n' THEN 'BREAKING'
     WHEN 'a' THEN 'WARNING'
@@ -33,7 +28,6 @@ SELECT CASE deptype
 END;
 $$ LANGUAGE sql IMMUTABLE STRICT;
 
--- helper view: column-level dependencies across views
 CREATE OR REPLACE VIEW pgvc_column_dependencies AS
 SELECT
     sn.nspname as source_schema,
@@ -64,7 +58,6 @@ WHERE dc.relkind IN ('v', 'm')
     AND NOT sa.attisdropped
 ORDER BY source_schema, source_object, source_column, dependent_schema, dependent_view;
 
--- helper view: deprecated columns with their dependents
 CREATE OR REPLACE VIEW pgvc_deprecated_with_dependents AS
 SELECT
     dc.schema_name,
@@ -91,23 +84,7 @@ GROUP BY
     dc.deprecated_at
 ORDER BY dc.schema_name, dc.view_name, dc.column_name;
 
-CREATE FUNCTION pgvc_analyze_drop_report(
-    p_schema_name text,
-    p_view_name   text,
-    p_column_name text
-) RETURNS text AS $$
-SELECT coalesce(
-    string_agg(
-        d.impact_severity || E'\t' || d.usage_location || '.' || d.dependent_column,
-        E'\n' ORDER BY d.impact_severity = 'BREAKING' DESC,
-                       d.dependent_view, d.dependent_column
-    ),
-    'no dependencies'
-)
-FROM analyze_drop_column(p_schema_name, p_view_name, p_column_name) d;
-$$ LANGUAGE sql STABLE STRICT;
-
-CREATE FUNCTION pgvc_dependency_order (p_schema text, p_object text)
+CREATE OR REPLACE FUNCTION pgvc_dependency_order (p_schema text, p_object text)
     RETURNS TABLE (
         level int,
         dep_schema text,
@@ -165,7 +142,7 @@ $$
 LANGUAGE sql
 STABLE STRICT;
 
-CREATE FUNCTION pgvc_get_view_definition(p_schema text, p_view text)
+CREATE OR REPLACE FUNCTION pgvc_get_view_definition(p_schema text, p_view text)
 RETURNS text AS $$
 SELECT
     'CREATE ' || CASE c.relkind
@@ -180,7 +157,7 @@ WHERE
   AND c.relkind IN ('v', 'm');
 $$ LANGUAGE sql STABLE STRICT;
 
-CREATE FUNCTION pgvc_get_view_grants(p_schema text, p_view text)
+CREATE OR REPLACE FUNCTION pgvc_get_view_grants(p_schema text, p_view text)
 RETURNS TABLE (
     grantee text,
     privilege_type text,
@@ -199,24 +176,3 @@ WHERE n.nspname = p_schema
   AND c.relkind IN ('v', 'm')
   AND a.grantee <> c.relowner
 $$ LANGUAGE sql STABLE STRICT;
-
-CREATE FUNCTION pgvc_generate_replace_view(p_schema text, p_view text, p_new_definition text)
-RETURNS TABLE(step int, operation text, sql text) AS $$
-    SELECT step, operation, sql FROM generate_replace_view(p_schema, p_view, p_new_definition);
-$$ LANGUAGE sql STABLE STRICT;
-
-CREATE FUNCTION pgvc_generate_drop_column(p_schema text, p_table text, p_column text)
-RETURNS TABLE(step int, operation text, sql text) AS $$
-    SELECT step, operation, sql FROM generate_drop_column(p_schema, p_table, p_column);
-$$ LANGUAGE sql STABLE STRICT;
-
-CREATE FUNCTION pgvc_generate_alter_type(p_schema text, p_table text, p_column text, p_new_type text)
-RETURNS TABLE(step int, operation text, sql text) AS $$
-    SELECT step, operation, sql FROM generate_alter_type(p_schema, p_table, p_column, p_new_type);
-$$ LANGUAGE sql STABLE STRICT;
-
-CREATE FUNCTION pgvc_generate_rename_view_column(p_schema text, p_view text, p_old_column text, p_new_column text)
-RETURNS TABLE(step int, operation text, sql text) AS $$
-    SELECT step, operation, sql FROM generate_rename_view_column(p_schema, p_view, p_old_column, p_new_column);
-$$ LANGUAGE sql STABLE STRICT;
-
