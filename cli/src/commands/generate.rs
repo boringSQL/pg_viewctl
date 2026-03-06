@@ -8,7 +8,7 @@ pub fn run(client: &mut Client, operation: &Operation) -> Vec<MigrationStep> {
         Operation::DropColumn { target } => {
             let t = crate::parse::parse_three_part(target);
             client.query(
-                "SELECT step, operation, sql FROM pgvc_generate_drop_column($1, $2, $3)",
+                "SELECT step, operation, sql FROM generate_drop_column($1, $2, $3)",
                 &[&t.schema, &t.object, &t.column],
             )
         }
@@ -16,21 +16,21 @@ pub fn run(client: &mut Client, operation: &Operation) -> Vec<MigrationStep> {
             let t = crate::parse::parse_two_part(target);
             let def = read_definition(definition);
             client.query(
-                "SELECT step, operation, sql FROM pgvc_generate_replace_view($1, $2, $3)",
+                "SELECT step, operation, sql FROM generate_replace_view($1, $2, $3)",
                 &[&t.schema, &t.object, &def],
             )
         }
         Operation::AlterType { target, new_type } => {
             let t = crate::parse::parse_three_part(target);
             client.query(
-                "SELECT step, operation, sql FROM pgvc_generate_alter_type($1, $2, $3, $4)",
+                "SELECT step, operation, sql FROM generate_alter_type($1, $2, $3, $4)",
                 &[&t.schema, &t.object, &t.column, new_type],
             )
         }
         Operation::RenameViewColumn { target, new_name } => {
             let t = crate::parse::parse_three_part(target);
             client.query(
-                "SELECT step, operation, sql FROM pgvc_generate_rename_view_column($1, $2, $3, $4)",
+                "SELECT step, operation, sql FROM generate_rename_view_column($1, $2, $3, $4)",
                 &[&t.schema, &t.object, &t.column, new_name],
             )
         }
