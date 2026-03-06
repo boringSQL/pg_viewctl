@@ -1,5 +1,6 @@
 mod commands;
 mod connection;
+mod output;
 mod parse;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -73,8 +74,10 @@ fn main() {
             let mut client = connection::connect(cli.dsn.as_deref());
             commands::plan::run(&mut client, &target);
         }
-        Command::Generate { .. } => {
-            eprintln!("generate is not implemented yet");
+        Command::Generate { format, operation } => {
+            let mut client = connection::connect(cli.dsn.as_deref());
+            let steps = commands::generate::run(&mut client, operation);
+            output::emit(&steps, format);
         }
     }
 }
