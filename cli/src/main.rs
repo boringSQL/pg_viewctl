@@ -63,6 +63,7 @@ pub enum Operation {
 pub enum OutputFormat {
     Sql,
     Plain,
+    Goose,
 }
 
 fn main() {
@@ -77,9 +78,20 @@ fn main() {
         Command::Generate { format, operation } => {
             let mut client = connection::connect(cli.dsn.as_deref());
             let steps = commands::generate::run(&mut client, operation);
-            output::emit(&steps, format);
+            let op_name = operation_slug(operation);
+            output::emit(&steps, format, &op_name);
         }
     }
+}
+
+fn operation_slug(operation: &Operation) -> String {
+    match operation {
+        Operation::DropColumn { .. } => "drop_column",
+        Operation::ReplaceView { .. } => "replace_view",
+        Operation::AlterType { .. } => "alter_type",
+        Operation::RenameViewColumn { .. } => "rename_view_column",
+    }
+    .to_string()
 }
 
 fn plan_target(operation: &Operation) -> parse::SchemaObject {
