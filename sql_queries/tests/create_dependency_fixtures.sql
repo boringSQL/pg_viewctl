@@ -1,4 +1,4 @@
-CREATE FUNCTION pgvc_map_deptype(deptype "char") RETURNS text AS $$
+CREATE OR REPLACE FUNCTION pgvc_map_deptype(deptype "char") RETURNS text AS $$
 SELECT CASE deptype
     WHEN 'n' THEN 'NORMAL'
     WHEN 'a' THEN 'AUTO'
@@ -9,7 +9,7 @@ SELECT CASE deptype
 END;
 $$ LANGUAGE sql IMMUTABLE STRICT;
 
-CREATE FUNCTION pgvc_map_impact(deptype "char") RETURNS text AS $$
+CREATE OR REPLACE FUNCTION pgvc_map_impact(deptype "char") RETURNS text AS $$
 SELECT CASE deptype
     WHEN 'n' THEN 'BREAKING'
     WHEN 'a' THEN 'WARNING'

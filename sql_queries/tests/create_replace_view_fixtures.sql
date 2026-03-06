@@ -1,5 +1,5 @@
 -- SQL functions that the generate_replace_view queries depend on
-CREATE FUNCTION pgvc_dependency_order (p_schema text, p_object text)
+CREATE OR REPLACE FUNCTION pgvc_dependency_order (p_schema text, p_object text)
     RETURNS TABLE (
         level int,
         dep_schema text,
@@ -57,7 +57,7 @@ $$
 LANGUAGE sql
 STABLE STRICT;
 
-CREATE FUNCTION pgvc_get_view_definition(p_schema text, p_view text)
+CREATE OR REPLACE FUNCTION pgvc_get_view_definition(p_schema text, p_view text)
 RETURNS text AS $$
 SELECT
     'CREATE ' || CASE c.relkind
@@ -72,7 +72,7 @@ WHERE
   AND c.relkind IN ('v', 'm');
 $$ LANGUAGE sql STABLE STRICT;
 
-CREATE FUNCTION pgvc_get_view_grants(p_schema text, p_view text)
+CREATE OR REPLACE FUNCTION pgvc_get_view_grants(p_schema text, p_view text)
 RETURNS TABLE (
     grantee text,
     privilege_type text,
