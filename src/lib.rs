@@ -1,5 +1,7 @@
 mod functions;
 
+pgrx::extension_sql_file!("../sql_queries/bootstrap.sql", name = "bootstrap", bootstrap);
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
