@@ -32,10 +32,16 @@ fn emit_plain(steps: &[MigrationStep]) {
         ));
     }
 
-    std::fs::write("up.sql", &buf).unwrap();
+    std::fs::write("up.sql", &buf).unwrap_or_else(|e| {
+        eprintln!("error: failed to write up.sql: {e}");
+        std::process::exit(1);
+    });
 
     let down_buf = generate_down(steps);
-    std::fs::write("down.sql", &down_buf).unwrap();
+    std::fs::write("down.sql", &down_buf).unwrap_or_else(|e| {
+        eprintln!("error: failed to write down.sql: {e}");
+        std::process::exit(1);
+    });
 
     eprintln!(
         "Wrote {} steps to up.sql + down.sql",
@@ -65,7 +71,10 @@ fn emit_goose(steps: &[MigrationStep], operation_name: &str) {
 
     let ts = Utc::now().format("%Y%m%d%H%M%S");
     let filename = format!("{}_{}.sql", ts, operation_name);
-    std::fs::write(&filename, &buf).unwrap();
+    std::fs::write(&filename, &buf).unwrap_or_else(|e| {
+        eprintln!("error: failed to write {}: {e}", filename);
+        std::process::exit(1);
+    });
 
     eprintln!("Wrote goose migration to {}", filename);
 }

@@ -8,7 +8,10 @@ pub fn run(client: &mut Client, target: &SchemaObject) {
             "SELECT level, dep_schema, dep_view FROM pgvc_dependency_order($1, $2) WHERE level > 0",
             &[&target.schema, &target.object],
         )
-        .unwrap();
+        .unwrap_or_else(|e| {
+            eprintln!("error: query failed: {e}");
+            std::process::exit(1);
+        });
 
     println!("Dependencies of {}.{}:", target.schema, target.object);
 

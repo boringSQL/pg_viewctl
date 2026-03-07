@@ -103,7 +103,8 @@ fn plan_target(operation: &Operation) -> parse::SchemaObject {
     };
     let parts: Vec<&str> = target_str.split('.').collect();
     if parts.len() < 2 {
-        panic!("target must have at least schema.object, got '{target_str}'");
+        eprintln!("error: target must have at least schema.object, got '{target_str}'");
+        std::process::exit(1);
     }
     parse::SchemaObject {
         schema: parts[0].to_string(),

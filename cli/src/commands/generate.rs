@@ -35,7 +35,10 @@ pub fn run(client: &mut Client, operation: &Operation) -> Vec<MigrationStep> {
             )
         }
     }
-    .unwrap();
+    .unwrap_or_else(|e| {
+        eprintln!("error: query failed: {e}");
+        std::process::exit(1);
+    });
 
     rows.iter()
         .map(|row| MigrationStep {
@@ -50,9 +53,15 @@ fn read_definition(source: &str) -> String {
     if source == "-" {
         use std::io::Read;
         let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf).unwrap();
+        std::io::stdin().read_to_string(&mut buf).unwrap_or_else(|e| {
+            eprintln!("error: failed to read from stdin: {e}");
+            std::process::exit(1);
+        });
         buf
     } else {
-        std::fs::read_to_string(source).unwrap()
+        std::fs::read_to_string(source).unwrap_or_else(|e| {
+            eprintln!("error: failed to read '{}': {e}", source);
+            std::process::exit(1);
+        })
     }
 }
