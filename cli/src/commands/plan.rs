@@ -2,23 +2,20 @@ use postgres::Client;
 
 use crate::parse::SchemaObject;
 
-pub fn run(client: &mut Client, target: &SchemaObject) {
+pub fn run(client: &mut Client, target: &SchemaObject) -> Result<(), String> {
     let rows = client
         .query(
             "SELECT level, dep_schema, dep_view FROM pgvc_dependency_order($1, $2) WHERE level > 0",
             &[&target.schema, &target.object],
         )
-        .unwrap_or_else(|e| {
-            eprintln!("error: query failed: {e}");
-            std::process::exit(1);
-        });
+        .map_err(|e| format!("query failed: {e}"))?;
 
     println!("Dependencies of {}.{}:", target.schema, target.object);
 
     if rows.is_empty() {
         println!("  (none)");
         println!("\n0 objects affected.");
-        return;
+        return Ok(());
     }
 
     for row in &rows {
@@ -29,4 +26,5 @@ pub fn run(client: &mut Client, target: &SchemaObject) {
     }
 
     println!("\n{} objects affected.", rows.len());
+    Ok(())
 }

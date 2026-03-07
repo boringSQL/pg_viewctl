@@ -69,19 +69,27 @@ pub enum OutputFormat {
 fn main() {
     let cli = Cli::parse();
 
+    if let Err(e) = run(cli) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<(), String> {
     match &cli.command {
         Command::Plan { operation } => {
-            let target = plan_target(operation);
-            let mut client = connection::connect(cli.dsn.as_deref());
-            commands::plan::run(&mut client, &target);
+            let target = plan_target(operation)?;
+            let mut client = connection::connect(cli.dsn.as_deref())?;
+            commands::plan::run(&mut client, &target)?;
         }
         Command::Generate { format, operation } => {
-            let mut client = connection::connect(cli.dsn.as_deref());
-            let steps = commands::generate::run(&mut client, operation);
+            let mut client = connection::connect(cli.dsn.as_deref())?;
+            let steps = commands::generate::run(&mut client, operation)?;
             let op_name = operation_slug(operation);
-            output::emit(&steps, format, &op_name);
+            output::emit(&steps, format, &op_name)?;
         }
     }
+    Ok(())
 }
 
 fn operation_slug(operation: &Operation) -> String {
@@ -94,7 +102,7 @@ fn operation_slug(operation: &Operation) -> String {
     .to_string()
 }
 
-fn plan_target(operation: &Operation) -> parse::SchemaObject {
+fn plan_target(operation: &Operation) -> Result<parse::SchemaObject, String> {
     let target_str = match operation {
         Operation::DropColumn { target } => target,
         Operation::ReplaceView { target, .. } => target,
@@ -103,11 +111,10 @@ fn plan_target(operation: &Operation) -> parse::SchemaObject {
     };
     let parts: Vec<&str> = target_str.split('.').collect();
     if parts.len() < 2 {
-        eprintln!("error: target must have at least schema.object, got '{target_str}'");
-        std::process::exit(1);
+        return Err(format!("target must have at least schema.object, got '{target_str}'"));
     }
-    parse::SchemaObject {
+    Ok(parse::SchemaObject {
         schema: parts[0].to_string(),
         object: parts[1].to_string(),
-    }
+    })
 }
