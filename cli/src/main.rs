@@ -65,6 +65,7 @@ pub enum OutputFormat {
     Sql,
     Plain,
     Goose,
+    Flyway,
 }
 
 fn main() {
