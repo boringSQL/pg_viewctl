@@ -1,14 +1,16 @@
+use anyhow::{bail, Context, Result};
 use postgres::{Client, NoTls};
 
-pub fn connect(dsn: Option<&str>) -> Result<Client, String> {
+pub fn connect(dsn: Option<&str>) -> Result<Client> {
     let mut client = match dsn {
         Some(url) => Client::connect(url, NoTls)
-            .map_err(|e| format!("failed to connect to PostgreSQL: {e}"))?,
+            .context("failed to connect to PostgreSQL")?,
         None => {
-            let config = "".parse::<postgres::Config>().unwrap();
+            let config = "".parse::<postgres::Config>()
+                .context("failed to parse default PostgreSQL config")?;
             config
                 .connect(NoTls)
-                .map_err(|e| format!("failed to connect to PostgreSQL: {e}"))?
+                .context("failed to connect to PostgreSQL")?
         }
     };
 
@@ -17,14 +19,15 @@ pub fn connect(dsn: Option<&str>) -> Result<Client, String> {
             "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_viewctl'",
             &[],
         )
-        .map_err(|e| format!("failed to check for pg_viewctl extension: {e}"))?;
+        .context("failed to check for pg_viewctl extension")?;
 
     match row {
         Some(row) => {
             let schema: String = row.get(0);
-            client.execute(&format!("SET search_path TO {}, public", schema), &[]).unwrap();
+            client.execute(&format!("SET search_path TO {}, public", schema), &[])
+                .context("failed to set search_path")?;
         }
-        None => return Err("pg_viewctl extension is not installed in the database".to_string()),
+        None => bail!("pg_viewctl extension is not installed in the database"),
     }
 
     Ok(client)

@@ -22,6 +22,7 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.17.0"
+thiserror = "2"
 
 [dev-dependencies]
 pgrx-tests = "=0.17.0"

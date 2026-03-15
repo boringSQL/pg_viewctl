@@ -8,6 +8,7 @@ name = "pg_viewctl"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 postgres = "0.19"

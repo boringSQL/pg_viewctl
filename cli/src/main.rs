@@ -3,6 +3,7 @@ mod connection;
 mod output;
 mod parse;
 
+use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -70,12 +71,12 @@ fn main() {
     let cli = Cli::parse();
 
     if let Err(e) = run(cli) {
-        eprintln!("error: {e}");
+        eprintln!("error: {e:#}");
         std::process::exit(1);
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+fn run(cli: Cli) -> Result<()> {
     match &cli.command {
         Command::Plan { operation } => {
             let target = plan_target(operation)?;
@@ -102,7 +103,7 @@ fn operation_slug(operation: &Operation) -> String {
     .to_string()
 }
 
-fn plan_target(operation: &Operation) -> Result<parse::SchemaObject, String> {
+fn plan_target(operation: &Operation) -> Result<parse::SchemaObject> {
     let target_str = match operation {
         Operation::DropColumn { target } => target,
         Operation::ReplaceView { target, .. } => target,
@@ -110,9 +111,10 @@ fn plan_target(operation: &Operation) -> Result<parse::SchemaObject, String> {
         Operation::RenameViewColumn { target, .. } => target,
     };
     let parts: Vec<&str> = target_str.split('.').collect();
-    if parts.len() < 2 {
-        return Err(format!("target must have at least schema.object, got '{target_str}'"));
-    }
+    anyhow::ensure!(
+        parts.len() >= 2,
+        "target must have at least schema.object, got '{target_str}'"
+    );
     Ok(parse::SchemaObject {
         schema: parts[0].to_string(),
         object: parts[1].to_string(),

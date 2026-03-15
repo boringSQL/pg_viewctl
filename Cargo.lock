@@ -1048,12 +1048,14 @@ version = "0.1.0"
 dependencies = [
  "pgrx",
  "pgrx-tests",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "pg_viewctl-cli"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "clap",
  "postgres",

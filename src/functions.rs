@@ -2,6 +2,13 @@ use pgrx::prelude::*;
 use pgrx::datum::{Date, DatumWithOid};
 use pgrx::spi::SpiClient;
 
+#[derive(thiserror::Error, Debug)]
+#[allow(dead_code)]
+pub(crate) enum ViewctlError {
+    #[error("{0}")]
+    Spi(#[from] spi::SpiError),
+}
+
 pub(crate) fn text_arg(val: &str) -> DatumWithOid<'_> {
     unsafe { DatumWithOid::new(val.into_datum(), PgBuiltInOids::TEXTOID.into()) }
 }
@@ -17,7 +24,8 @@ fn optional_date_arg(val: Option<Date>) -> DatumWithOid<'static> {
 fn pg_quote_ident(name: &str) -> String {
     let name = name.to_string();
     unsafe {
-        let cname = std::ffi::CString::new(name.clone()).unwrap();
+        let cname = std::ffi::CString::new(name.clone())
+            .unwrap_or_else(|_| pgrx::error!("identifier contains null byte"));
         let quoted = pgrx::pg_sys::quote_identifier(cname.as_ptr());
         let result = std::ffi::CStr::from_ptr(quoted)
             .to_string_lossy()
@@ -231,7 +239,10 @@ pub fn check_column_deprecated(
 
         Ok(Some(msg))
     })
-    .unwrap_or(None)
+    .unwrap_or_else(|e| {
+        pgrx::warning!("check_column_deprecated: {e}");
+        None
+    })
 }
 
 #[pg_extern]
@@ -272,7 +283,7 @@ pub fn deprecate_column(
             "column {schema_name}.{view_name}.{column_name} deprecated"
         ))
     })
-    .unwrap()
+    .unwrap_or_else(|e| pgrx::error!("{e}"))
 }
 
 #[pg_extern]
@@ -332,7 +343,7 @@ pub fn undeprecate_column(
             ))
         }
     })
-    .unwrap()
+    .unwrap_or_else(|e| pgrx::error!("{e}"))
 }
 
 #[pg_extern]
@@ -497,7 +508,7 @@ pub fn generate_replace_view(
 
         Ok::<_, spi::SpiError>(plan.into_table_iter())
     })
-    .unwrap()
+    .unwrap_or_else(|e| pgrx::error!("{e}"))
 }
 
 #[pg_extern]
@@ -563,7 +574,7 @@ pub fn generate_drop_column(
 
         Ok::<_, spi::SpiError>(plan.into_table_iter())
     })
-    .unwrap()
+    .unwrap_or_else(|e| pgrx::error!("{e}"))
 }
 
 #[pg_extern]
@@ -640,7 +651,7 @@ pub fn generate_alter_type(
 
         Ok::<_, spi::SpiError>(plan.into_table_iter())
     })
-    .unwrap()
+    .unwrap_or_else(|e| pgrx::error!("{e}"))
 }
 
 #[pg_extern]
@@ -778,6 +789,6 @@ pub fn generate_rename_view_column(
 
         Ok::<_, spi::SpiError>(plan.into_table_iter())
     })
-    .unwrap()
+    .unwrap_or_else(|e| pgrx::error!("{e}"))
 }
 

@@ -9,22 +9,18 @@ pub struct SchemaObjectColumn {
     pub column: String,
 }
 
-pub fn parse_two_part(target: &str) -> Result<SchemaObject, String> {
+pub fn parse_two_part(target: &str) -> anyhow::Result<SchemaObject> {
     let parts: Vec<&str> = target.split('.').collect();
-    if parts.len() != 2 {
-        return Err(format!("expected schema.object, got '{target}'"));
-    }
+    anyhow::ensure!(parts.len() == 2, "expected schema.object, got '{target}'");
     Ok(SchemaObject {
         schema: parts[0].to_string(),
         object: parts[1].to_string(),
     })
 }
 
-pub fn parse_three_part(target: &str) -> Result<SchemaObjectColumn, String> {
+pub fn parse_three_part(target: &str) -> anyhow::Result<SchemaObjectColumn> {
     let parts: Vec<&str> = target.split('.').collect();
-    if parts.len() != 3 {
-        return Err(format!("expected schema.object.column, got '{target}'"));
-    }
+    anyhow::ensure!(parts.len() == 3, "expected schema.object.column, got '{target}'");
     Ok(SchemaObjectColumn {
         schema: parts[0].to_string(),
         object: parts[1].to_string(),

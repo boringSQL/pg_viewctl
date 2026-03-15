@@ -1,14 +1,15 @@
+use anyhow::{Context, Result};
 use postgres::Client;
 
 use crate::parse::SchemaObject;
 
-pub fn run(client: &mut Client, target: &SchemaObject) -> Result<(), String> {
+pub fn run(client: &mut Client, target: &SchemaObject) -> Result<()> {
     let rows = client
         .query(
             "SELECT level, dep_schema, dep_view FROM pgvc_dependency_order($1, $2) WHERE level > 0",
             &[&target.schema, &target.object],
         )
-        .map_err(|e| format!("query failed: {e}"))?;
+        .context("query failed")?;
 
     println!("Dependencies of {}.{}:", target.schema, target.object);
 

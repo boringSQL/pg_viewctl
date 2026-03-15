@@ -1,9 +1,10 @@
+use anyhow::{Context, Result};
 use postgres::Client;
 
 use super::MigrationStep;
 use crate::Operation;
 
-pub fn run(client: &mut Client, operation: &Operation) -> Result<Vec<MigrationStep>, String> {
+pub fn run(client: &mut Client, operation: &Operation) -> Result<Vec<MigrationStep>> {
     let rows = match operation {
         Operation::DropColumn { target } => {
             let t = crate::parse::parse_three_part(target)?;
@@ -35,7 +36,7 @@ pub fn run(client: &mut Client, operation: &Operation) -> Result<Vec<MigrationSt
             )
         }
     }
-    .map_err(|e| format!("query failed: {e}"))?;
+    .context("query failed")?;
 
     Ok(rows
         .iter()
@@ -47,16 +48,16 @@ pub fn run(client: &mut Client, operation: &Operation) -> Result<Vec<MigrationSt
         .collect())
 }
 
-fn read_definition(source: &str) -> Result<String, String> {
+fn read_definition(source: &str) -> Result<String> {
     if source == "-" {
         use std::io::Read;
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
-            .map_err(|e| format!("failed to read from stdin: {e}"))?;
+            .context("failed to read from stdin")?;
         Ok(buf)
     } else {
         std::fs::read_to_string(source)
-            .map_err(|e| format!("failed to read '{}': {e}", source))
+            .with_context(|| format!("failed to read '{source}'"))
     }
 }
