@@ -317,7 +317,7 @@ pub fn get_column_dependencies(
         }
         Ok::<_, spi::SpiError>(rows)
     })
-    .unwrap_or_default();
+    .unwrap_or_else(|e| pgrx::error!("{e}"));
 
     TableIterator::new(rows)
 }
@@ -382,7 +382,7 @@ pub fn analyze_drop_column(
         }
         Ok::<_, spi::SpiError>(rows)
     })
-    .unwrap_or_default();
+    .unwrap_or_else(|e| pgrx::error!("{e}"));
 
     TableIterator::new(rows)
 }
@@ -419,7 +419,7 @@ pub fn get_deprecated_columns(
         }
         Ok::<_, spi::SpiError>(rows)
     })
-    .unwrap_or_default();
+    .unwrap_or_else(|e| pgrx::error!("{e}"));
 
     TableIterator::new(rows)
 }
