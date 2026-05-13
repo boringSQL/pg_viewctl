@@ -148,8 +148,8 @@ fn invert_steps(steps: &[MigrationStep]) -> Vec<(Option<String>, String)> {
         let clean_sql = strip_trailing_semicolon(&step.sql);
 
         if is_drop(op) {
-            let name = extract_object_name(&step.sql);
-            let create_sql = find_create_sql_for(&name, steps);
+            let name = step.target.as_deref().unwrap_or("<unknown>");
+            let create_sql = find_create_sql_for(name, steps);
             if create_sql.is_empty() {
                 result.push((
                     Some(format!("TODO: recreate {} (definition not found)", name)),
@@ -163,7 +163,7 @@ fn invert_steps(steps: &[MigrationStep]) -> Vec<(Option<String>, String)> {
                 ));
             }
         } else if is_create(op) {
-            let name = extract_object_name(&step.sql);
+            let name = step.target.as_deref().unwrap_or("<unknown>");
             let drop_kind = if op.contains("MATERIALIZED") {
                 "MATERIALIZED VIEW"
             } else {
@@ -214,7 +214,7 @@ fn is_create(operation: &str) -> bool {
 
 fn find_create_sql_for(object_name: &str, steps: &[MigrationStep]) -> String {
     for step in steps {
-        if is_create(&step.operation) && extract_object_name(&step.sql) == object_name {
+        if is_create(&step.operation) && step.target.as_deref() == Some(object_name) {
             return step.sql.clone();
         }
     }
@@ -232,28 +232,3 @@ fn strip_trailing_semicolon(sql: &str) -> String {
     sql.trim_end().trim_end_matches(';').trim_end().to_string()
 }
 
-/// "CREATE OR REPLACE VIEW public.my_view AS ..." to "public.my_view"
-/// "DROP VIEW IF EXISTS public.my_view CASCADE" to "public.my_view"
-fn extract_object_name(sql: &str) -> String {
-    let skip_words = [
-        "DROP", "CREATE", "OR", "REPLACE", "MATERIALIZED", "VIEW", "IF", "EXISTS", "CASCADE",
-    ];
-
-    // skip leading SQL comment lines
-    let effective = sql
-        .lines()
-        .find(|l| !l.trim_start().starts_with("--"))
-        .unwrap_or("");
-
-    for word in effective.split_whitespace() {
-        let clean = word.trim_end_matches('(');
-        let normalized = clean.replace('"', "").to_uppercase();
-        if skip_words.contains(&normalized.as_str()) {
-            continue;
-        }
-        // strip quotes so "hr"."v_foo" and hr.v_foo match
-        return clean.replace('"', "");
-    }
-
-    String::new()
-}

@@ -64,7 +64,7 @@ impl DepInfo {
     }
 }
 
-type StepRow = (i32, Option<String>, Option<String>);
+type StepRow = (i32, Option<String>, Option<String>, Option<String>);
 
 struct MigrationPlan {
     steps: Vec<StepRow>,
@@ -79,9 +79,13 @@ impl MigrationPlan {
         }
     }
 
-    fn add(&mut self, operation: &str, sql: String) {
-        self.steps
-            .push((self.step_num, Some(operation.to_string()), Some(sql)));
+    fn add(&mut self, operation: &str, sql: String, target: Option<String>) {
+        self.steps.push((
+            self.step_num,
+            Some(operation.to_string()),
+            Some(sql),
+            target,
+        ));
         self.step_num += 1;
     }
 
@@ -92,6 +96,7 @@ impl MigrationPlan {
             self.add(
                 &format!("DROP {kind}"),
                 format!("DROP {kind} IF EXISTS {qualified}"),
+                Some(qualified),
             );
         }
     }
@@ -106,13 +111,17 @@ impl MigrationPlan {
                 Some(comment) => format!("{comment}\n{}", dep.view_def),
                 None => dep.view_def.clone(),
             };
-            self.add(&format!("CREATE {}", dep.kind_label()), create_sql);
+            self.add(
+                &format!("CREATE {}", dep.kind_label()),
+                create_sql,
+                Some(dep.qualified_name()),
+            );
         }
     }
 
     fn restore_grants(&mut self, grants: &[String]) {
         for grant in grants {
-            self.add("GRANT", grant.clone());
+            self.add("GRANT", grant.clone(), None);
         }
     }
 
@@ -121,13 +130,16 @@ impl MigrationPlan {
             self.add(
                 "REFRESH MATERIALIZED VIEW",
                 format!("REFRESH MATERIALIZED VIEW {target}"),
+                Some(target.to_string()),
             );
         }
         for dep in deps {
             if dep.view_kind == "m" {
+                let qualified = dep.qualified_name();
                 self.add(
                     "REFRESH MATERIALIZED VIEW",
-                    format!("REFRESH MATERIALIZED VIEW {}", dep.qualified_name()),
+                    format!("REFRESH MATERIALIZED VIEW {qualified}"),
+                    Some(qualified),
                 );
             }
         }
@@ -141,6 +153,7 @@ impl MigrationPlan {
             name!(step, i32),
             name!(operation, Option<String>),
             name!(sql, Option<String>),
+            name!(target, Option<String>),
         ),
     > {
         TableIterator::new(self.steps)
@@ -435,6 +448,7 @@ pub fn generate_replace_view(
         name!(step, i32),
         name!(operation, Option<String>),
         name!(sql, Option<String>),
+        name!(target, Option<String>),
     ),
 > {
     let target_kind_sql = include_str!("../sql_queries/generate_replace_view_target_kind.sql");
@@ -484,15 +498,18 @@ pub fn generate_replace_view(
             plan.add(
                 &format!("DROP {kind}"),
                 format!("DROP {kind} IF EXISTS {qualified_target}"),
+                Some(qualified_target.clone()),
             );
             plan.add(
                 &format!("CREATE {kind}"),
                 format!("CREATE {kind} {qualified_target} AS\n{trimmed}"),
+                Some(qualified_target.clone()),
             );
         } else {
             plan.add(
                 "CREATE OR REPLACE VIEW",
                 format!("CREATE OR REPLACE VIEW {qualified_target} AS\n{trimmed}"),
+                Some(qualified_target.clone()),
             );
         }
 
@@ -522,6 +539,7 @@ pub fn generate_drop_column(
         name!(step, i32),
         name!(operation, Option<String>),
         name!(sql, Option<String>),
+        name!(target, Option<String>),
     ),
 > {
     let validate_sql = include_str!("../sql_queries/generate_drop_column_validate.sql");
@@ -561,6 +579,7 @@ pub fn generate_drop_column(
                 "ALTER TABLE {qualified_table} DROP COLUMN {}",
                 pg_quote_ident(column_name)
             ),
+            Some(qualified_table.clone()),
         );
         plan.create_dependents(&deps, |dep| {
             if dep_references_column(&col_refs, dep) {
@@ -589,6 +608,7 @@ pub fn generate_alter_type(
         name!(step, i32),
         name!(operation, Option<String>),
         name!(sql, Option<String>),
+        name!(target, Option<String>),
     ),
 > {
     let validate_sql = include_str!("../sql_queries/generate_alter_type_validate.sql");
@@ -636,6 +656,7 @@ pub fn generate_alter_type(
                 "ALTER TABLE {qualified_table} ALTER COLUMN {} TYPE {new_type}",
                 pg_quote_ident(column_name)
             ),
+            Some(qualified_table.clone()),
         );
         plan.create_dependents(&deps, |dep| {
             if dep_references_column(&col_refs, dep) {
@@ -666,6 +687,7 @@ pub fn generate_rename_view_column(
         name!(step, i32),
         name!(operation, Option<String>),
         name!(sql, Option<String>),
+        name!(target, Option<String>),
     ),
 > {
     let validate_sql = include_str!("../sql_queries/generate_rename_view_column_validate.sql");
@@ -762,12 +784,14 @@ pub fn generate_rename_view_column(
         plan.add(
             &format!("DROP {target_kind_label}"),
             format!("DROP {target_kind_label} IF EXISTS {qualified_target}"),
+            Some(qualified_target.clone()),
         );
         plan.add(
             &format!("CREATE {target_kind_label}"),
             format!(
                 "CREATE {target_kind_label} {qualified_target} ({column_list}) AS\n{select_body}"
             ),
+            Some(qualified_target.clone()),
         );
         plan.create_dependents(&deps, |dep| {
             if dep_references_column(&col_refs, dep) {
